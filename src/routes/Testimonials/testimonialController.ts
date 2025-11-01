@@ -1,9 +1,61 @@
-// backend/src/controllers/testimonialController.ts
+// backend/src/controllers/testimonialController.ts - بهینه‌سازی شده با Redis
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import Testimonial from '../../models/Testimonials';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
+import { redisClient } from '../../config/redis';
+
+// کلیدهای کش
+const CACHE_KEYS = {
+    APPROVED_TESTIMONIALS: 'approved_testimonials',
+    ALL_TESTIMONIALS: 'all_testimonials',
+    TESTIMONIAL_STATS: 'testimonial_stats',
+    TESTIMONIAL_DETAIL: 'testimonial_detail'
+};
+
+// زمان انقضای کش (ثانیه)
+const CACHE_TTL = {
+    SHORT: 300,    // 5 دقیقه
+    MEDIUM: 1800,  // 30 دقیقه
+    LONG: 3600     // 1 ساعت
+};
+
+// توابع کمکی کش
+const cacheGet = async (key: string): Promise<any> => {
+    try {
+        const cached = await redisClient.get(key);
+        return cached ? JSON.parse(cached) : null;
+    } catch (error) {
+        logger.error('Cache get error', { key, error });
+        return null;
+    }
+};
+
+const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
+    try {
+        await redisClient.setEx(key, ttl, JSON.stringify(data));
+    } catch (error) {
+        logger.error('Cache set error', { key, error });
+    }
+};
+
+const invalidateTestimonialCache = async (): Promise<void> => {
+    try {
+        const keys = await redisClient.keys(`${CACHE_KEYS.APPROVED_TESTIMONIALS}:*`);
+        const allKeys = await redisClient.keys(`${CACHE_KEYS.ALL_TESTIMONIALS}:*`);
+        const statsKeys = await redisClient.keys(`${CACHE_KEYS.TESTIMONIAL_STATS}:*`);
+
+        const allCacheKeys = [...keys, ...allKeys, ...statsKeys];
+
+        if (allCacheKeys.length > 0) {
+            await redisClient.del(allCacheKeys);
+            logger.debug('Testimonial cache invalidated', { keysCount: allCacheKeys.length });
+        }
+    } catch (error) {
+        logger.error('Testimonial cache invalidation error', { error });
+    }
+};
 
 // ایجاد نظر جدید توسط کاربر
 export const createTestimonial = async (req: AuthRequest, res: Response) => {
@@ -21,11 +73,14 @@ export const createTestimonial = async (req: AuthRequest, res: Response) => {
             email,
             message,
             rating: parseInt(rating),
-            isApproved: false, // پیش‌فرض عدم تایید
+            isApproved: false,
             isActive: true
         });
 
         await testimonial.save();
+
+        // 🔥 حذف کش مرتبط
+        await invalidateTestimonialCache();
 
         logger.info('New testimonial submitted', {
             testimonialId: testimonial._id.toString(),
@@ -68,6 +123,18 @@ export const getApprovedTestimonials = async (req: AuthRequest, res: Response) =
             sortOrder = 'desc'
         } = req.query;
 
+        const cacheKey = `${CACHE_KEYS.APPROVED_TESTIMONIALS}:${page}:${limit}:${sortBy}:${sortOrder}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            logger.debug('Serving approved testimonials from cache', { cacheKey });
+            return res.json({
+                ...cached,
+                fromCache: true
+            });
+        }
+
         const filter = {
             isApproved: true,
             isActive: true
@@ -83,7 +150,7 @@ export const getApprovedTestimonials = async (req: AuthRequest, res: Response) =
 
         const total = await Testimonial.countDocuments(filter);
 
-        res.json({
+        const responseData = {
             success: true,
             testimonials,
             pagination: {
@@ -92,6 +159,14 @@ export const getApprovedTestimonials = async (req: AuthRequest, res: Response) =
                 limit: Number(limit),
                 totalPages: Math.ceil(total / Number(limit))
             }
+        };
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, responseData, CACHE_TTL.MEDIUM);
+
+        res.json({
+            ...responseData,
+            fromCache: false
         });
 
     } catch (error: any) {
@@ -113,6 +188,18 @@ export const getAllTestimonials = async (req: AuthRequest, res: Response) => {
             isApproved,
             isActive
         } = req.query;
+
+        const cacheKey = `${CACHE_KEYS.ALL_TESTIMONIALS}:${page}:${limit}:${isApproved}:${isActive}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            logger.debug('Serving all testimonials from cache', { cacheKey });
+            return res.json({
+                ...cached,
+                fromCache: true
+            });
+        }
 
         const filter: any = {};
 
@@ -138,7 +225,7 @@ export const getAllTestimonials = async (req: AuthRequest, res: Response) => {
             pending: await Testimonial.countDocuments({ isApproved: false, isActive: true })
         };
 
-        res.json({
+        const responseData = {
             success: true,
             testimonials,
             stats,
@@ -148,6 +235,14 @@ export const getAllTestimonials = async (req: AuthRequest, res: Response) => {
                 limit: Number(limit),
                 totalPages: Math.ceil(total / Number(limit))
             }
+        };
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, responseData, CACHE_TTL.SHORT);
+
+        res.json({
+            ...responseData,
+            fromCache: false
         });
 
     } catch (error: any) {
@@ -182,6 +277,9 @@ export const approveTestimonial = async (req: AuthRequest, res: Response) => {
                 message: 'نظر یافت نشد'
             });
         }
+
+        // 🔥 حذف کش مرتبط
+        await invalidateTestimonialCache();
 
         LoggerService.userLog(req.userId!, 'approve_testimonial', {
             testimonialId: id,
@@ -234,6 +332,9 @@ export const rejectTestimonial = async (req: AuthRequest, res: Response) => {
             });
         }
 
+        // 🔥 حذف کش مرتبط
+        await invalidateTestimonialCache();
+
         LoggerService.userLog(req.userId!, 'reject_testimonial', {
             testimonialId: id,
             userName: testimonial.name
@@ -272,6 +373,9 @@ export const deleteTestimonial = async (req: AuthRequest, res: Response) => {
             });
         }
 
+        // 🔥 حذف کش مرتبط
+        await invalidateTestimonialCache();
+
         LoggerService.userLog(req.userId!, 'delete_testimonial', {
             testimonialId: id,
             userName: testimonial.name
@@ -298,6 +402,18 @@ export const deleteTestimonial = async (req: AuthRequest, res: Response) => {
 // دریافت آمار نظرات
 export const getTestimonialStats = async (req: AuthRequest, res: Response) => {
     try {
+        const cacheKey = CACHE_KEYS.TESTIMONIAL_STATS;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            return res.json({
+                success: true,
+                stats: cached,
+                fromCache: true
+            });
+        }
+
         const stats = {
             total: await Testimonial.countDocuments({}),
             approved: await Testimonial.countDocuments({ isApproved: true, isActive: true }),
@@ -326,9 +442,13 @@ export const getTestimonialStats = async (req: AuthRequest, res: Response) => {
             stats.averageRating = Math.round(ratingStats[0].averageRating * 10) / 10;
         }
 
+        // ذخیره در کش
+        await cacheSet(cacheKey, stats, CACHE_TTL.SHORT);
+
         res.json({
             success: true,
-            stats
+            stats,
+            fromCache: false
         });
 
     } catch (error: any) {

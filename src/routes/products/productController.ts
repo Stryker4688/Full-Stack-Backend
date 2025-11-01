@@ -1,19 +1,87 @@
-// backend/src/controllers/productController.ts
+// backend/src/controllers/productController.ts - بهینه‌سازی شده با Redis
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import Product from '../../models/product';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import { deleteFile, getFileUrl } from '../../config/multerConfig';
+import { redisClient } from '../../config/redis';
+
+// کلیدهای کش
+const CACHE_KEYS = {
+    FEATURED: 'featured_products',
+    MENU: 'menu_products',
+    POPULAR: 'popular_products',
+    PRODUCT_DETAIL: 'product_detail',
+    SEARCH: 'product_search'
+};
+
+// زمان انقضای کش (ثانیه)
+const CACHE_TTL = {
+    SHORT: 300, // 5 دقیقه
+    MEDIUM: 600, // 10 دقیقه
+    LONG: 1800 // 30 دقیقه
+};
+
+// تابع کمکی برای کش کردن
+const cacheGet = async (key: string): Promise<any> => {
+    try {
+        const cached = await redisClient.get(key);
+        return cached ? JSON.parse(cached) : null;
+    } catch (error) {
+        logger.error('Cache get error', { key, error });
+        return null;
+    }
+};
+
+// تابع کمکی برای ذخیره در کش
+const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
+    try {
+        await redisClient.setEx(key, ttl, JSON.stringify(data));
+    } catch (error) {
+        logger.error('Cache set error', { key, error });
+    }
+};
+
+// تابع کمکی برای حذف کش مرتبط
+const invalidateProductCache = async (): Promise<void> => {
+    try {
+        const keys = await redisClient.keys(`${CACHE_KEYS.FEATURED}:*`);
+        const menuKeys = await redisClient.keys(`${CACHE_KEYS.MENU}:*`);
+        const popularKeys = await redisClient.keys(`${CACHE_KEYS.POPULAR}:*`);
+
+        const allKeys = [...keys, ...menuKeys, ...popularKeys];
+
+        if (allKeys.length > 0) {
+            await redisClient.del(allKeys);
+            logger.debug('Product cache invalidated', { keysCount: allKeys.length });
+        }
+    } catch (error) {
+        logger.error('Cache invalidation error', { error });
+    }
+};
 
 // 🆕 تابع برای صفحه home - بخش offer (محصولات ویژه)
 export const getFeaturedProducts = async (req: AuthRequest, res: Response) => {
     try {
         const { limit = 8 } = req.query;
+        const cacheKey = `${CACHE_KEYS.FEATURED}:${limit}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            logger.debug('Serving featured products from cache', { cacheKey });
+            return res.json({
+                success: true,
+                products: cached,
+                section: 'offer',
+                fromCache: true
+            });
+        }
 
         const products = await Product.find({
             isActive: true,
-            isFeatured: true, // فقط محصولات ویژه
+            isFeatured: true,
             inStock: true
         })
             .populate('createdBy', 'name')
@@ -21,10 +89,14 @@ export const getFeaturedProducts = async (req: AuthRequest, res: Response) => {
             .sort({ createdAt: -1 })
             .limit(Number(limit));
 
+        // ذخیره در کش
+        await cacheSet(cacheKey, products, CACHE_TTL.SHORT);
+
         res.json({
             success: true,
             products,
-            section: 'offer'
+            section: 'offer',
+            fromCache: false
         });
 
     } catch (error: any) {
@@ -47,9 +119,21 @@ export const getMenuProducts = async (req: AuthRequest, res: Response) => {
             roastLevel
         } = req.query;
 
+        const cacheKey = `${CACHE_KEYS.MENU}:${page}:${limit}:${category}:${roastLevel}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            logger.debug('Serving menu products from cache', { cacheKey });
+            return res.json({
+                ...cached,
+                fromCache: true
+            });
+        }
+
         const filter: any = {
             isActive: true,
-            isFeatured: false, // فقط محصولات معمولی
+            isFeatured: false,
             inStock: true
         };
 
@@ -68,10 +152,10 @@ export const getMenuProducts = async (req: AuthRequest, res: Response) => {
         // 🆕 گرفتن محصولات پرطرفدار برای بخش بالای منو
         const popularProducts = await getPopularProductsForMenu();
 
-        res.json({
+        const responseData = {
             success: true,
-            popularProducts, // 🆕 محصولات پرطرفدار
-            regularProducts: products, // محصولات معمولی
+            popularProducts,
+            regularProducts: products,
             pagination: {
                 total,
                 page: Number(page),
@@ -79,6 +163,14 @@ export const getMenuProducts = async (req: AuthRequest, res: Response) => {
                 totalPages: Math.ceil(total / Number(limit))
             },
             section: 'menu'
+        };
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, responseData, CACHE_TTL.MEDIUM);
+
+        res.json({
+            ...responseData,
+            fromCache: false
         });
 
     } catch (error: any) {
@@ -109,9 +201,21 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
             });
         }
 
+        const cacheKey = `${CACHE_KEYS.SEARCH}:${query}:${page}:${limit}:${category}:${roastLevel}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            logger.debug('Serving search results from cache', { cacheKey });
+            return res.json({
+                ...cached,
+                fromCache: true
+            });
+        }
+
         const filter: any = {
             isActive: true,
-            isFeatured: false, // فقط محصولات معمولی منو
+            isFeatured: false,
             inStock: true
         };
 
@@ -134,7 +238,7 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
         // 🆕 پیشنهادات جستجو
         const searchSuggestions = await getSearchSuggestions(query as string);
 
-        res.json({
+        const responseData = {
             success: true,
             products,
             searchInfo: {
@@ -149,6 +253,14 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
                 totalPages: Math.ceil(total / Number(limit))
             },
             section: 'menu-search'
+        };
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, responseData, CACHE_TTL.SHORT);
+
+        res.json({
+            ...responseData,
+            fromCache: false
         });
 
     } catch (error: any) {
@@ -164,9 +276,17 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
 // 🆕 تابع کمکی برای محصولات پرطرفدار منو
 const getPopularProductsForMenu = async (limit: number = 6) => {
     try {
+        const cacheKey = `${CACHE_KEYS.POPULAR}:${limit}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
         const products = await Product.find({
             isActive: true,
-            isFeatured: false, // فقط محصولات معمولی
+            isFeatured: false,
             inStock: true
         })
             .populate('createdBy', 'name')
@@ -177,6 +297,9 @@ const getPopularProductsForMenu = async (limit: number = 6) => {
                 createdAt: -1
             })
             .limit(limit);
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, products, CACHE_TTL.LONG);
 
         return products;
     } catch (error) {
@@ -208,52 +331,6 @@ export const getPopularProducts = async (req: AuthRequest, res: Response) => {
     }
 };
 
-// 🆕 تابع کمکی برای پیشنهادات جستجو
-const getSearchSuggestions = async (query: string): Promise<string[]> => {
-    try {
-        const suggestions = await Product.aggregate([
-            {
-                $match: {
-                    $text: { $search: query },
-                    isActive: true,
-                    isFeatured: false // فقط از محصولات معمولی
-                }
-            },
-            {
-                $unwind: "$searchKeywords"
-            },
-            {
-                $match: {
-                    "searchKeywords": { $regex: query, $options: 'i' }
-                }
-            },
-            {
-                $group: {
-                    _id: "$searchKeywords",
-                    count: { $sum: 1 }
-                }
-            },
-            {
-                $sort: { count: -1 }
-            },
-            {
-                $limit: 5
-            },
-            {
-                $project: {
-                    _id: 0,
-                    keyword: "$_id"
-                }
-            }
-        ]);
-
-        return suggestions.map(s => s.keyword);
-    } catch (error) {
-        logger.error('Error getting search suggestions:', error);
-        return [];
-    }
-};
-
 // ایجاد محصول جدید
 export const createProduct = async (req: AuthRequest, res: Response) => {
     try {
@@ -268,7 +345,7 @@ export const createProduct = async (req: AuthRequest, res: Response) => {
             origin,
             weight,
             stockQuantity,
-            isFeatured = 'false' // پیش‌فرض محصول معمولی
+            isFeatured = 'false'
         } = req.body;
 
         // بررسی فایل‌های آپلود شده
@@ -289,12 +366,15 @@ export const createProduct = async (req: AuthRequest, res: Response) => {
             origin,
             weight: parseFloat(weight),
             stockQuantity: parseInt(stockQuantity),
-            isFeatured: isFeatured === 'true', // تعیین محل نمایش
+            isFeatured: isFeatured === 'true',
             images,
             createdBy: req.userId
         });
 
         await product.save();
+
+        // 🔥 حذف کش مرتبط
+        await invalidateProductCache();
 
         const destination = product.isFeatured ? 'پیشنهادات ویژه' : 'منو';
 
@@ -394,6 +474,9 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
             { new: true, runValidators: true }
         ).populate('createdBy', 'name email');
 
+        // 🔥 حذف کش مرتبط
+        await invalidateProductCache();
+
         const destination = updatedProduct?.isFeatured ? 'پیشنهادات ویژه' : 'منو';
 
         LoggerService.userLog(req.userId!, 'update_product', {
@@ -451,6 +534,9 @@ export const deleteProduct = async (req: AuthRequest, res: Response) => {
         }
 
         await Product.findByIdAndDelete(id);
+
+        // 🔥 حذف کش مرتبط
+        await invalidateProductCache();
 
         LoggerService.userLog(req.userId!, 'delete_product', {
             productId: id,
@@ -537,6 +623,17 @@ export const getAdminProducts = async (req: AuthRequest, res: Response) => {
 export const getProductById = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
+        const cacheKey = `${CACHE_KEYS.PRODUCT_DETAIL}:${id}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            return res.json({
+                success: true,
+                product: cached,
+                fromCache: true
+            });
+        }
 
         const product = await Product.findById(id)
             .populate('createdBy', 'name');
@@ -548,9 +645,13 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
             });
         }
 
+        // ذخیره در کش
+        await cacheSet(cacheKey, product, CACHE_TTL.LONG);
+
         res.json({
             success: true,
-            product
+            product,
+            fromCache: false
         });
 
     } catch (error: any) {
@@ -590,6 +691,9 @@ export const deleteProductImage = async (req: AuthRequest, res: Response) => {
 
         product.images = updatedImages;
         await product.save();
+
+        // 🔥 حذف کش مرتبط
+        await invalidateProductCache();
 
         LoggerService.userLog(req.userId!, 'delete_product_image', {
             productId: id,
@@ -631,6 +735,17 @@ export const getProducts = async (req: AuthRequest, res: Response) => {
             search
         } = req.query;
 
+        const cacheKey = `products:${page}:${limit}:${category}:${roastLevel}:${minPrice}:${maxPrice}:${inStock}:${isFeatured}:${search}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            return res.json({
+                ...cached,
+                fromCache: true
+            });
+        }
+
         const filter: any = { isActive: true };
 
         if (category) filter.category = category;
@@ -663,7 +778,7 @@ export const getProducts = async (req: AuthRequest, res: Response) => {
 
         const total = await Product.countDocuments(filter);
 
-        res.json({
+        const responseData = {
             success: true,
             products,
             pagination: {
@@ -672,6 +787,14 @@ export const getProducts = async (req: AuthRequest, res: Response) => {
                 limit: Number(limit),
                 totalPages: Math.ceil(total / Number(limit))
             }
+        };
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, responseData, CACHE_TTL.MEDIUM);
+
+        res.json({
+            ...responseData,
+            fromCache: false
         });
 
     } catch (error: any) {
@@ -681,5 +804,64 @@ export const getProducts = async (req: AuthRequest, res: Response) => {
             message: 'خطا در دریافت محصولات',
             error: error.message
         });
+    }
+};
+
+// 🆕 تابع کمکی برای پیشنهادات جستجو
+const getSearchSuggestions = async (query: string): Promise<string[]> => {
+    try {
+        const cacheKey = `search_suggestions:${query}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        const suggestions = await Product.aggregate([
+            {
+                $match: {
+                    $text: { $search: query },
+                    isActive: true,
+                    isFeatured: false
+                }
+            },
+            {
+                $unwind: "$searchKeywords"
+            },
+            {
+                $match: {
+                    "searchKeywords": { $regex: query, $options: 'i' }
+                }
+            },
+            {
+                $group: {
+                    _id: "$searchKeywords",
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { count: -1 }
+            },
+            {
+                $limit: 5
+            },
+            {
+                $project: {
+                    _id: 0,
+                    keyword: "$_id"
+                }
+            }
+        ]);
+
+        const result = suggestions.map(s => s.keyword);
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, result, CACHE_TTL.LONG);
+
+        return result;
+    } catch (error) {
+        logger.error('Error getting search suggestions:', error);
+        return [];
     }
 };

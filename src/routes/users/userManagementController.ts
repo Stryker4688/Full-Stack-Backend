@@ -1,10 +1,70 @@
-// backend/src/controllers/userManagementController.ts - به‌روزرسانی شده
+// backend/src/controllers/userManagementController.ts - بهینه‌سازی شده با Redis
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import User from '../../models/users';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import jwt from 'jsonwebtoken';
+import { redisClient } from '../../config/redis';
+
+// کلیدهای کش
+const CACHE_KEYS = {
+    USERS_LIST: 'users_list',
+    USER_DETAIL: 'user_detail',
+    USER_STATS: 'user_stats',
+    USER_SESSION: 'user_session'
+};
+
+// زمان انقضای کش (ثانیه)
+const CACHE_TTL = {
+    SHORT: 300,    // 5 دقیقه
+    MEDIUM: 1800,  // 30 دقیقه
+    LONG: 3600     // 1 ساعت
+};
+
+// توابع کمکی کش
+const cacheGet = async (key: string): Promise<any> => {
+    try {
+        const cached = await redisClient.get(key);
+        return cached ? JSON.parse(cached) : null;
+    } catch (error) {
+        logger.error('Cache get error', { key, error });
+        return null;
+    }
+};
+
+const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
+    try {
+        await redisClient.setEx(key, ttl, JSON.stringify(data));
+    } catch (error) {
+        logger.error('Cache set error', { key, error });
+    }
+};
+
+const invalidateUserCache = async (userId?: string): Promise<void> => {
+    try {
+        const listKeys = await redisClient.keys(`${CACHE_KEYS.USERS_LIST}:*`);
+        const statsKeys = await redisClient.keys(`${CACHE_KEYS.USER_STATS}:*`);
+
+        let allKeys = [...listKeys, ...statsKeys];
+
+        // اگر userId مشخص شده، کش جزئیات کاربر را هم حذف کن
+        if (userId) {
+            const userDetailKey = `${CACHE_KEYS.USER_DETAIL}:${userId}`;
+            allKeys.push(userDetailKey);
+        }
+
+        if (allKeys.length > 0) {
+            await redisClient.del(allKeys);
+            logger.debug('User cache invalidated', {
+                keysCount: allKeys.length,
+                userId
+            });
+        }
+    } catch (error) {
+        logger.error('User cache invalidation error', { error });
+    }
+};
 
 export const getAllUsers = async (req: AuthRequest, res: Response) => {
     try {
@@ -15,6 +75,18 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
             role = '',
             isActive = ''
         } = req.query;
+
+        const cacheKey = `${CACHE_KEYS.USERS_LIST}:${page}:${limit}:${search}:${role}:${isActive}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            logger.debug('Serving users list from cache', { cacheKey });
+            return res.json({
+                ...cached,
+                fromCache: true
+            });
+        }
 
         // ساخت شرط جستجو
         const searchFilter: any = {};
@@ -48,14 +120,7 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
 
         const total = await User.countDocuments(searchFilter);
 
-        LoggerService.userLog(req.userId!, 'get_all_users', {
-            page,
-            limit,
-            search,
-            total
-        });
-
-        res.json({
+        const responseData = {
             success: true,
             users,
             pagination: {
@@ -64,6 +129,21 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
                 limit: Number(limit),
                 totalPages: Math.ceil(total / Number(limit))
             }
+        };
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, responseData, CACHE_TTL.SHORT);
+
+        LoggerService.userLog(req.userId!, 'get_all_users', {
+            page,
+            limit,
+            search,
+            total
+        });
+
+        res.json({
+            ...responseData,
+            fromCache: false
         });
 
     } catch (error) {
@@ -80,6 +160,21 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
 export const getUserById = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
+        const cacheKey = `${CACHE_KEYS.USER_DETAIL}:${id}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            LoggerService.userLog(req.userId!, 'get_user_by_id', {
+                targetUserId: id,
+                fromCache: true
+            });
+            return res.json({
+                success: true,
+                user: cached,
+                fromCache: true
+            });
+        }
 
         const user = await User.findById(id)
             .select('-password -emailVerificationCode -emailVerificationCodeExpires');
@@ -91,13 +186,17 @@ export const getUserById = async (req: AuthRequest, res: Response) => {
             });
         }
 
+        // ذخیره در کش
+        await cacheSet(cacheKey, user, CACHE_TTL.MEDIUM);
+
         LoggerService.userLog(req.userId!, 'get_user_by_id', {
             targetUserId: id
         });
 
         res.json({
             success: true,
-            user
+            user,
+            fromCache: false
         });
 
     } catch (error) {
@@ -123,8 +222,18 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // پیدا کردن کاربر هدف
-        const targetUser = await User.findById(userId);
+        const cacheKey = `${CACHE_KEYS.USER_DETAIL}:${userId}`;
+
+        // بررسی کش برای اطلاعات کاربر
+        let targetUser = await cacheGet(cacheKey);
+        if (!targetUser) {
+            // اگر در کش نیست، از دیتابیس بگیر
+            targetUser = await User.findById(userId);
+            if (targetUser) {
+                await cacheSet(cacheKey, targetUser, CACHE_TTL.MEDIUM);
+            }
+        }
+
         if (!targetUser) {
             return res.status(404).json({
                 success: false,
@@ -159,6 +268,14 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
             process.env.JWT_SECRET!,
             { expiresIn: '1h' }
         );
+
+        // ذخیره session در Redis
+        const sessionKey = `${CACHE_KEYS.USER_SESSION}:${targetUser._id.toString()}`;
+        await cacheSet(sessionKey, {
+            adminId: currentAdmin._id.toString(),
+            impersonatedAt: new Date().toISOString(),
+            originalRole: targetUser.role
+        }, 3600); // 1 ساعت
 
         LoggerService.userLog(req.userId!, 'login_as_user', {
             targetUserId: userId,
@@ -226,6 +343,9 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
             });
         }
 
+        // 🔥 حذف کش مرتبط
+        await invalidateUserCache(id);
+
         LoggerService.userLog(req.userId!, 'update_user_status', {
             targetUserId: id,
             newStatus: isActive ? 'active' : 'inactive'
@@ -252,6 +372,17 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
 export const getUserStats = async (req: AuthRequest, res: Response) => {
     try {
         const currentAdmin = await User.findById(req.userId);
+        const cacheKey = `${CACHE_KEYS.USER_STATS}:${currentAdmin?.role}`;
+
+        // بررسی کش
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            return res.json({
+                success: true,
+                stats: cached,
+                fromCache: true
+            });
+        }
 
         let userFilter: any = { _id: { $ne: req.userId } };
 
@@ -273,15 +404,21 @@ export const getUserStats = async (req: AuthRequest, res: Response) => {
             createdAt: { $gte: thirtyDaysAgo }
         });
 
+        const stats = {
+            totalUsers,
+            activeUsers,
+            inactiveUsers: totalUsers - activeUsers,
+            adminsCount: currentAdmin?.role === 'super_admin' ? adminsCount : undefined,
+            newUsersLast30Days: newUsers
+        };
+
+        // ذخیره در کش
+        await cacheSet(cacheKey, stats, CACHE_TTL.SHORT);
+
         res.json({
             success: true,
-            stats: {
-                totalUsers,
-                activeUsers,
-                inactiveUsers: totalUsers - activeUsers,
-                adminsCount: currentAdmin?.role === 'super_admin' ? adminsCount : undefined,
-                newUsersLast30Days: newUsers
-            }
+            stats,
+            fromCache: false
         });
 
     } catch (error) {
@@ -292,5 +429,27 @@ export const getUserStats = async (req: AuthRequest, res: Response) => {
             success: false,
             message: 'خطا در دریافت آمار کاربران'
         });
+    }
+};
+
+// 🆕 تابع برای دریافت اطلاعات session از Redis
+export const getImpersonationSession = async (userId: string): Promise<any> => {
+    try {
+        const sessionKey = `${CACHE_KEYS.USER_SESSION}:${userId}`;
+        return await cacheGet(sessionKey);
+    } catch (error) {
+        logger.error('Error getting impersonation session', { userId, error });
+        return null;
+    }
+};
+
+// 🆕 تابع برای حذف session از Redis
+export const clearImpersonationSession = async (userId: string): Promise<void> => {
+    try {
+        const sessionKey = `${CACHE_KEYS.USER_SESSION}:${userId}`;
+        await redisClient.del(sessionKey);
+        logger.debug('Impersonation session cleared', { userId });
+    } catch (error) {
+        logger.error('Error clearing impersonation session', { userId, error });
     }
 };
