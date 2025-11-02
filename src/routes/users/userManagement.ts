@@ -1,7 +1,7 @@
 // backend/src/routes/userManagement.ts
 import express from 'express';
 import { authenticateToken } from '../../middlewares/auth';
-import { requireAdmin } from '../../middlewares/adminAuth'; 
+import { requireAdmin } from '../../middlewares/adminAuth';
 import {
     getAllUsers,
     getUserById,
@@ -12,11 +12,11 @@ import {
 
 const router = express.Router();
 
-// ادمین و سوپر ادمین می‌توانند کاربران را مدیریت کنند
+// Admin and super admin can manage users
 router.use(authenticateToken);
 router.use(requireAdmin);
 
-// مدیریت کاربران
+// User management
 router.get('/users', getAllUsers);
 router.get('/users/stats', getUserStats);
 router.get('/users/:id', getUserById);

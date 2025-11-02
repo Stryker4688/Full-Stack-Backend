@@ -1,63 +1,17 @@
-// backend/src/controllers/testimonialController.ts - بهینه‌سازی شده با Redis
+// backend/src/controllers/testimonialController.ts - Optimized with cache utilities
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import Testimonial from '../../models/Testimonials';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
-import { redisClient } from '../../config/redis';
+import {
+    clearTestimonialCache,
+    generateKey,
+    CACHE_TTL,
+    cacheWithFallback
+} from '../../utils/cacheUtils';
 
-// کلیدهای کش
-const CACHE_KEYS = {
-    APPROVED_TESTIMONIALS: 'approved_testimonials',
-    ALL_TESTIMONIALS: 'all_testimonials',
-    TESTIMONIAL_STATS: 'testimonial_stats',
-    TESTIMONIAL_DETAIL: 'testimonial_detail'
-};
-
-// زمان انقضای کش (ثانیه)
-const CACHE_TTL = {
-    SHORT: 300,    // 5 دقیقه
-    MEDIUM: 1800,  // 30 دقیقه
-    LONG: 3600     // 1 ساعت
-};
-
-// توابع کمکی کش
-const cacheGet = async (key: string): Promise<any> => {
-    try {
-        const cached = await redisClient.get(key);
-        return cached ? JSON.parse(cached) : null;
-    } catch (error) {
-        logger.error('Cache get error', { key, error });
-        return null;
-    }
-};
-
-const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
-    try {
-        await redisClient.setEx(key, ttl, JSON.stringify(data));
-    } catch (error) {
-        logger.error('Cache set error', { key, error });
-    }
-};
-
-const invalidateTestimonialCache = async (): Promise<void> => {
-    try {
-        const keys = await redisClient.keys(`${CACHE_KEYS.APPROVED_TESTIMONIALS}:*`);
-        const allKeys = await redisClient.keys(`${CACHE_KEYS.ALL_TESTIMONIALS}:*`);
-        const statsKeys = await redisClient.keys(`${CACHE_KEYS.TESTIMONIAL_STATS}:*`);
-
-        const allCacheKeys = [...keys, ...allKeys, ...statsKeys];
-
-        if (allCacheKeys.length > 0) {
-            await redisClient.del(allCacheKeys);
-            logger.debug('Testimonial cache invalidated', { keysCount: allCacheKeys.length });
-        }
-    } catch (error) {
-        logger.error('Testimonial cache invalidation error', { error });
-    }
-};
-
-// ایجاد نظر جدید توسط کاربر
+// Create new testimonial (public endpoint)
 export const createTestimonial = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -67,7 +21,15 @@ export const createTestimonial = async (req: AuthRequest, res: Response) => {
             rating = 5
         } = req.body;
 
-        // ایجاد نظر جدید
+        // Validate required fields
+        if (!name || !email || !message) {
+            return res.status(400).json({
+                success: false,
+                message: 'Name, email, and message are required fields'
+            });
+        }
+
+        // Create new testimonial
         const testimonial = new Testimonial({
             name,
             email,
@@ -79,10 +41,10 @@ export const createTestimonial = async (req: AuthRequest, res: Response) => {
 
         await testimonial.save();
 
-        // 🔥 حذف کش مرتبط
-        await invalidateTestimonialCache();
+        // Clear testimonial cache to reflect new submission
+        await clearTestimonialCache();
 
-        logger.info('New testimonial submitted', {
+        logger.info('New testimonial submitted successfully', {
             testimonialId: testimonial._id.toString(),
             name,
             email,
@@ -91,7 +53,7 @@ export const createTestimonial = async (req: AuthRequest, res: Response) => {
 
         res.status(201).json({
             success: true,
-            message: 'نظر شما با موفقیت ثبت شد و پس از تایید مدیریت نمایش داده خواهد شد',
+            message: 'Your testimonial has been submitted successfully and will be displayed after admin approval',
             testimonial: {
                 id: testimonial._id.toString(),
                 name: testimonial.name,
@@ -107,13 +69,13 @@ export const createTestimonial = async (req: AuthRequest, res: Response) => {
 
         res.status(500).json({
             success: false,
-            message: 'خطا در ثبت نظر',
+            message: 'Error submitting testimonial',
             error: error.message
         });
     }
 };
 
-// دریافت نظرات تایید شده برای نمایش در صفحه Testimonials
+// Get approved testimonials for public display
 export const getApprovedTestimonials = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -123,63 +85,62 @@ export const getApprovedTestimonials = async (req: AuthRequest, res: Response) =
             sortOrder = 'desc'
         } = req.query;
 
-        const cacheKey = `${CACHE_KEYS.APPROVED_TESTIMONIALS}:${page}:${limit}:${sortBy}:${sortOrder}`;
+        // Generate cache key based on query parameters
+        const cacheKey = generateKey.testimonialList(
+            Number(page),
+            Number(limit),
+            `${sortBy}:${sortOrder}`
+        );
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            logger.debug('Serving approved testimonials from cache', { cacheKey });
-            return res.json({
-                ...cached,
-                fromCache: true
-            });
-        }
+        // Use cache with fallback pattern
+        const responseData = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const filter = {
+                    isApproved: true,
+                    isActive: true
+                };
 
-        const filter = {
-            isApproved: true,
-            isActive: true
-        };
+                const sort: any = {};
+                sort[sortBy as string] = sortOrder === 'asc' ? 1 : -1;
 
-        const sort: any = {};
-        sort[sortBy as string] = sortOrder === 'asc' ? 1 : -1;
+                const testimonials = await Testimonial.find(filter)
+                    .sort(sort)
+                    .limit(Number(limit))
+                    .skip((Number(page) - 1) * Number(limit));
 
-        const testimonials = await Testimonial.find(filter)
-            .sort(sort)
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
+                const total = await Testimonial.countDocuments(filter);
 
-        const total = await Testimonial.countDocuments(filter);
-
-        const responseData = {
-            success: true,
-            testimonials,
-            pagination: {
-                total,
-                page: Number(page),
-                limit: Number(limit),
-                totalPages: Math.ceil(total / Number(limit))
-            }
-        };
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, responseData, CACHE_TTL.MEDIUM);
+                return {
+                    success: true,
+                    testimonials,
+                    pagination: {
+                        total,
+                        page: Number(page),
+                        limit: Number(limit),
+                        totalPages: Math.ceil(total / Number(limit))
+                    }
+                };
+            },
+            CACHE_TTL.MEDIUM
+        );
 
         res.json({
             ...responseData,
-            fromCache: false
+            fromCache: true // Indicate that data came from cache (handled internally in cacheWithFallback)
         });
 
     } catch (error: any) {
         LoggerService.errorLog('getApprovedTestimonials', error);
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت نظرات',
+            message: 'Error retrieving testimonials',
             error: error.message
         });
     }
 };
 
-// دریافت تمام نظرات برای ادمین (تایید شده و نشده)
+// Get all testimonials for admin management
 export const getAllTestimonials = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -189,61 +150,51 @@ export const getAllTestimonials = async (req: AuthRequest, res: Response) => {
             isActive
         } = req.query;
 
-        const cacheKey = `${CACHE_KEYS.ALL_TESTIMONIALS}:${page}:${limit}:${isApproved}:${isActive}`;
+        const cacheKey = `all_testimonials:${page}:${limit}:${isApproved}:${isActive}`;
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            logger.debug('Serving all testimonials from cache', { cacheKey });
-            return res.json({
-                ...cached,
-                fromCache: true
-            });
-        }
+        const responseData = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const filter: any = {};
 
-        const filter: any = {};
+                if (isApproved !== undefined) {
+                    filter.isApproved = isApproved === 'true';
+                }
 
-        if (isApproved !== undefined) {
-            filter.isApproved = isApproved === 'true';
-        }
+                if (isActive !== undefined) {
+                    filter.isActive = isActive === 'true';
+                }
 
-        if (isActive !== undefined) {
-            filter.isActive = isActive === 'true';
-        }
+                const testimonials = await Testimonial.find(filter)
+                    .sort({ createdAt: -1 })
+                    .limit(Number(limit))
+                    .skip((Number(page) - 1) * Number(limit));
 
-        const testimonials = await Testimonial.find(filter)
-            .sort({ createdAt: -1 })
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
+                const total = await Testimonial.countDocuments(filter);
 
-        const total = await Testimonial.countDocuments(filter);
+                // Get statistics for admin dashboard
+                const stats = {
+                    total: await Testimonial.countDocuments({}),
+                    approved: await Testimonial.countDocuments({ isApproved: true, isActive: true }),
+                    pending: await Testimonial.countDocuments({ isApproved: false, isActive: true })
+                };
 
-        // آمار برای ادمین
-        const stats = {
-            total: await Testimonial.countDocuments({}),
-            approved: await Testimonial.countDocuments({ isApproved: true, isActive: true }),
-            pending: await Testimonial.countDocuments({ isApproved: false, isActive: true })
-        };
+                return {
+                    success: true,
+                    testimonials,
+                    stats,
+                    pagination: {
+                        total,
+                        page: Number(page),
+                        limit: Number(limit),
+                        totalPages: Math.ceil(total / Number(limit))
+                    }
+                };
+            },
+            CACHE_TTL.SHORT
+        );
 
-        const responseData = {
-            success: true,
-            testimonials,
-            stats,
-            pagination: {
-                total,
-                page: Number(page),
-                limit: Number(limit),
-                totalPages: Math.ceil(total / Number(limit))
-            }
-        };
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, responseData, CACHE_TTL.SHORT);
-
-        res.json({
-            ...responseData,
-            fromCache: false
-        });
+        res.json(responseData);
 
     } catch (error: any) {
         LoggerService.errorLog('getAllTestimonials', error, {
@@ -251,13 +202,13 @@ export const getAllTestimonials = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت نظرات',
+            message: 'Error retrieving testimonials',
             error: error.message
         });
     }
 };
 
-// تایید نظر توسط ادمین
+// Approve testimonial (admin only)
 export const approveTestimonial = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -274,12 +225,12 @@ export const approveTestimonial = async (req: AuthRequest, res: Response) => {
         if (!testimonial) {
             return res.status(404).json({
                 success: false,
-                message: 'نظر یافت نشد'
+                message: 'Testimonial not found'
             });
         }
 
-        // 🔥 حذف کش مرتبط
-        await invalidateTestimonialCache();
+        // Clear testimonial cache to reflect changes
+        await clearTestimonialCache();
 
         LoggerService.userLog(req.userId!, 'approve_testimonial', {
             testimonialId: id,
@@ -294,7 +245,7 @@ export const approveTestimonial = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            message: 'نظر با موفقیت تایید شد و در صفحه نظرات نمایش داده خواهد شد',
+            message: 'Testimonial approved successfully and will be displayed on the testimonials page',
             testimonial
         });
 
@@ -305,13 +256,13 @@ export const approveTestimonial = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در تایید نظر',
+            message: 'Error approving testimonial',
             error: error.message
         });
     }
 };
 
-// رد نظر توسط ادمین
+// Reject testimonial (admin only)
 export const rejectTestimonial = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -328,12 +279,12 @@ export const rejectTestimonial = async (req: AuthRequest, res: Response) => {
         if (!testimonial) {
             return res.status(404).json({
                 success: false,
-                message: 'نظر یافت نشد'
+                message: 'Testimonial not found'
             });
         }
 
-        // 🔥 حذف کش مرتبط
-        await invalidateTestimonialCache();
+        // Clear testimonial cache
+        await clearTestimonialCache();
 
         LoggerService.userLog(req.userId!, 'reject_testimonial', {
             testimonialId: id,
@@ -342,7 +293,7 @@ export const rejectTestimonial = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            message: 'نظر رد شد و نمایش داده نخواهد شد',
+            message: 'Testimonial rejected and will not be displayed',
             testimonial
         });
 
@@ -353,13 +304,13 @@ export const rejectTestimonial = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در رد نظر',
+            message: 'Error rejecting testimonial',
             error: error.message
         });
     }
 };
 
-// حذف نظر توسط ادمین
+// Delete testimonial (admin only)
 export const deleteTestimonial = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -369,12 +320,12 @@ export const deleteTestimonial = async (req: AuthRequest, res: Response) => {
         if (!testimonial) {
             return res.status(404).json({
                 success: false,
-                message: 'نظر یافت نشد'
+                message: 'Testimonial not found'
             });
         }
 
-        // 🔥 حذف کش مرتبط
-        await invalidateTestimonialCache();
+        // Clear testimonial cache
+        await clearTestimonialCache();
 
         LoggerService.userLog(req.userId!, 'delete_testimonial', {
             testimonialId: id,
@@ -383,7 +334,7 @@ export const deleteTestimonial = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            message: 'نظر با موفقیت حذف شد'
+            message: 'Testimonial deleted successfully'
         });
 
     } catch (error: any) {
@@ -393,69 +344,63 @@ export const deleteTestimonial = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در حذف نظر',
+            message: 'Error deleting testimonial',
             error: error.message
         });
     }
 };
 
-// دریافت آمار نظرات
+// Get testimonial statistics
 export const getTestimonialStats = async (req: AuthRequest, res: Response) => {
     try {
-        const cacheKey = CACHE_KEYS.TESTIMONIAL_STATS;
+        const cacheKey = 'testimonial_stats';
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return res.json({
-                success: true,
-                stats: cached,
-                fromCache: true
-            });
-        }
+        const stats = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const stats = {
+                    total: await Testimonial.countDocuments({}),
+                    approved: await Testimonial.countDocuments({ isApproved: true, isActive: true }),
+                    pending: await Testimonial.countDocuments({ isApproved: false, isActive: true }),
+                    averageRating: 0
+                };
 
-        const stats = {
-            total: await Testimonial.countDocuments({}),
-            approved: await Testimonial.countDocuments({ isApproved: true, isActive: true }),
-            pending: await Testimonial.countDocuments({ isApproved: false, isActive: true }),
-            averageRating: 0
-        };
+                // Calculate average rating for approved testimonials
+                const ratingStats = await Testimonial.aggregate([
+                    {
+                        $match: {
+                            isApproved: true,
+                            isActive: true
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: null,
+                            averageRating: { $avg: "$rating" },
+                            totalRatings: { $sum: 1 }
+                        }
+                    }
+                ]);
 
-        // محاسبه میانگین امتیاز نظرات تایید شده
-        const ratingStats = await Testimonial.aggregate([
-            {
-                $match: {
-                    isApproved: true,
-                    isActive: true
+                if (ratingStats.length > 0) {
+                    stats.averageRating = Math.round(ratingStats[0].averageRating * 10) / 10;
                 }
+
+                return stats;
             },
-            {
-                $group: {
-                    _id: null,
-                    averageRating: { $avg: "$rating" },
-                    totalRatings: { $sum: 1 }
-                }
-            }
-        ]);
-
-        if (ratingStats.length > 0) {
-            stats.averageRating = Math.round(ratingStats[0].averageRating * 10) / 10;
-        }
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, stats, CACHE_TTL.SHORT);
+            CACHE_TTL.SHORT
+        );
 
         res.json({
             success: true,
-            stats,
-            fromCache: false
+            stats
         });
 
     } catch (error: any) {
         LoggerService.errorLog('getTestimonialStats', error);
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت آمار نظرات',
+            message: 'Error retrieving testimonial statistics',
             error: error.message
         });
     }

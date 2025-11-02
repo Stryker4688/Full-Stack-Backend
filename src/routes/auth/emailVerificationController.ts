@@ -1,4 +1,4 @@
-// backend/src/controllers/emailVerificationController.ts - بهینه‌سازی شده با Redis
+// backend/src/controllers/emailVerificationController.ts - Complete optimized version
 import { Response } from 'express';
 import User from '../../models/users';
 import { EmailService } from '../../services/emailService';
@@ -7,74 +7,34 @@ import { logger } from '../../config/logger';
 import { AuthRequest } from '../../middlewares/auth';
 import jwt from 'jsonwebtoken';
 import { redisClient } from '../../config/redis';
+import {
+    cacheGet,
+    cacheSet,
+    cacheDelete,
+    cacheIncr,
+    generateKey,
+    CACHE_TTL,
+    CACHE_KEYS
+} from '../../utils/cacheUtils';
 
-// کلیدهای کش
-const CACHE_KEYS = {
-    VERIFICATION_CODE: 'verification_code',
-    VERIFICATION_ATTEMPTS: 'verification_attempts',
-    BLOCKED_VERIFICATION: 'blocked_verification',
-    TEMP_TOKENS: 'temp_tokens',
-    USER_VERIFICATION_STATUS: 'user_verification_status'
-};
-
-// زمان انقضای کش (ثانیه)
-const CACHE_TTL = {
-    SHORT: 300,      // 5 دقیقه
-    MEDIUM: 600,     // 10 دقیقه
-    LONG: 1800,      // 30 دقیقه
-    VERY_LONG: 3600  // 1 ساعت
-};
-
-// توابع کمکی کش
-const cacheGet = async (key: string): Promise<any> => {
-    try {
-        const cached = await redisClient.get(key);
-        return cached ? JSON.parse(cached) : null;
-    } catch (error) {
-        logger.error('Cache get error', { key, error });
-        return null;
-    }
-};
-
-const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
-    try {
-        await redisClient.setEx(key, ttl, JSON.stringify(data));
-    } catch (error) {
-        logger.error('Cache set error', { key, error });
-    }
-};
-
-const cacheDelete = async (key: string): Promise<void> => {
-    try {
-        await redisClient.del(key);
-    } catch (error) {
-        logger.error('Cache delete error', { key, error });
-    }
-};
-
-// تابع برای مدیریت تلاش‌های ناموفق تأیید کد
+// Manage verification code attempts and blocking
 const handleVerificationAttempt = async (email: string, ip: string): Promise<{ blocked: boolean; remainingAttempts: number }> => {
-    const attemptKey = `${CACHE_KEYS.VERIFICATION_ATTEMPTS}:${email}:${ip}`;
-    const blockKey = `${CACHE_KEYS.BLOCKED_VERIFICATION}:${email}:${ip}`;
+    const attemptKey = generateKey.rateLimit(`verification:${email}:${ip}`);
+    const blockKey = generateKey.rateLimit(`blocked_verification:${email}:${ip}`);
 
-    // بررسی اگر کاربر بلاک شده
-    const isBlocked = await redisClient.get(blockKey);
+    // Check if user is blocked
+    const isBlocked = await cacheGet(blockKey);
     if (isBlocked) {
         return { blocked: true, remainingAttempts: 0 };
     }
 
-    // افزایش تعداد تلاش‌ها
-    const attempts = await redisClient.incr(attemptKey);
+    // Increment attempt counter
+    const attempts = await cacheIncr(attemptKey, 900); // 15 minutes TTL
 
-    // اگر اولین تلاش است، TTL تنظیم کن
-    if (attempts === 1) {
-        await redisClient.expire(attemptKey, 900); // 15 دقیقه
-    }
-
-    // اگر بیش از 3 تلاش ناموفق، کاربر را بلاک کن
+    // Block user if exceeded maximum attempts
     if (attempts >= 3) {
-        await redisClient.setEx(blockKey, 1800, 'blocked'); // 30 دقیقه بلاک
-        await redisClient.del(attemptKey);
+        await cacheSet(blockKey, 'blocked', 1800); // 30 minutes block
+        await cacheDelete(attemptKey);
 
         logger.warn('User temporarily blocked due to failed verification attempts', {
             email,
@@ -88,287 +48,52 @@ const handleVerificationAttempt = async (email: string, ip: string): Promise<{ b
     return { blocked: false, remainingAttempts: 3 - attempts };
 };
 
-// تابع برای ریست کردن تلاش‌های ناموفق
+// Reset verification attempts on successful verification
 const resetVerificationAttempts = async (email: string, ip: string): Promise<void> => {
-    const attemptKey = `${CACHE_KEYS.VERIFICATION_ATTEMPTS}:${email}:${ip}`;
-    const blockKey = `${CACHE_KEYS.BLOCKED_VERIFICATION}:${email}:${ip}`;
+    const attemptKey = generateKey.rateLimit(`verification:${email}:${ip}`);
+    const blockKey = generateKey.rateLimit(`blocked_verification:${email}:${ip}`);
 
     await Promise.all([
-        redisClient.del(attemptKey),
-        redisClient.del(blockKey)
+        cacheDelete(attemptKey),
+        cacheDelete(blockKey)
     ]);
 };
 
-export const sendVerificationEmail = async (req: AuthRequest, res: Response) => {
-    try {
-        // اضافه کردن چک برای وجود req.user
-        if (!req.user || !req.user.userId) {
-            logger.warn('No user found in request for email verification');
-            return res.status(401).json({
-                success: false,
-                message: 'Authentication required'
-            });
-        }
-
-        const userId = req.user.userId;
-        const ip = req.ip || 'unknown';
-
-        logger.debug('Sending verification CODE for user', { userId, ip });
-
-        // 🔥 بررسی rate limiting برای ارسال ایمیل
-        const emailLimitKey = `${CACHE_KEYS.VERIFICATION_ATTEMPTS}:send:${userId}:${ip}`;
-        const emailAttempts = await redisClient.incr(emailLimitKey);
-
-        if (emailAttempts === 1) {
-            await redisClient.expire(emailLimitKey, 300); // 5 دقیقه
-        }
-
-        if (emailAttempts > 3) {
-            logger.warn('Too many verification email requests', { userId, ip, attempts: emailAttempts });
-            return res.status(429).json({
-                success: false,
-                message: 'تعداد درخواست‌های ارسال ایمیل بیش از حد مجاز است. لطفاً 5 دقیقه دیگر تلاش کنید.'
-            });
-        }
-
-        const user = await User.findById(userId);
-        if (!user) {
-            logger.warn('User not found for email verification', { userId });
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
-        }
-
-        logger.debug('User found for email verification', { email: user.email });
-
-        if (user.emailVerified) {
-            logger.warn('Email already verified', { userId, email: user.email });
-            return res.status(400).json({
-                success: false,
-                message: 'Email already verified'
-            });
-        }
-
-        // تولید کد 6 رقمی
-        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 دقیقه
-
-        logger.debug('Generated 6-digit verification code', {
-            userId,
-            email: user.email,
-            code: verificationCode
-        });
-
-        // 🔥 ذخیره کد در Redis
-        const codeKey = `${CACHE_KEYS.VERIFICATION_CODE}:${user.email}`;
-        await cacheSet(codeKey, {
-            code: verificationCode,
-            expiresAt: codeExpires.toISOString(),
-            attempts: 0,
-            createdAt: new Date().toISOString()
-        }, 600); // 10 دقیقه
-
-        // آپدیت کاربر با کد تأیید
-        await User.findByIdAndUpdate(userId, {
-            emailVerificationCode: verificationCode,
-            emailVerificationCodeExpires: codeExpires,
-            emailVerificationSentAt: new Date()
-        });
-
-        // ارسال ایمیل با کد
-        const emailSent = await EmailService.sendVerificationCode(
-            user.email,
-            verificationCode,
-            user.name
-        );
-
-        logger.debug('Email sending result', { emailSent, userId });
-
-        if (!emailSent) {
-            // حذف کد از کش اگر ایمیل ارسال نشد
-            await cacheDelete(codeKey);
-            logger.error('Failed to send verification email', { userId, email: user.email });
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to send verification email'
-            });
-        }
-
-        LoggerService.authLog(userId, 'verification_code_sent', {
-            email: user.email,
-            code: verificationCode
-        });
-
-        logger.info('Verification code sent successfully', {
-            userId,
-            email: user.email
-        });
-
-        res.json({
-            success: true,
-            message: 'Verification code sent successfully'
-        });
-
-    } catch (error: any) {
-        logger.error('Send verification error', {
-            error: error.message,
-            stack: error.stack,
-            userId: req.user?.userId
-        });
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
-    }
-};
-
-export const verifyEmailCode = async (req: AuthRequest, res: Response) => {
-    try {
-        const { code, email } = req.body;
-        const ip = req.ip || 'unknown';
-
-        logger.debug('Verifying email code', { email, codeLength: code?.length, ip });
-
-        if (!code || code.length !== 6) {
-            logger.warn('Invalid verification code format', { codeLength: code?.length });
-            return res.status(400).json({
-                success: false,
-                message: 'Valid 6-digit verification code is required'
-            });
-        }
-
-        if (!email) {
-            logger.warn('Email missing for verification');
-            return res.status(400).json({
-                success: false,
-                message: 'Email is required'
-            });
-        }
-
-        // 🔥 بررسی rate limiting برای تأیید کد
-        const verificationCheck = await handleVerificationAttempt(email, ip);
-        if (verificationCheck.blocked) {
-            return res.status(429).json({
-                success: false,
-                message: 'تعداد تلاش‌های ناموفق بیش از حد مجاز است. لطفاً 30 دقیقه دیگر تلاش کنید.'
-            });
-        }
-
-        // 🔥 اول بررسی کش برای کد تأیید
-        const codeKey = `${CACHE_KEYS.VERIFICATION_CODE}:${email}`;
-        const cachedCode = await cacheGet(codeKey);
-
-        if (cachedCode) {
-            // بررسی انقضای کد در کش
-            const expiresAt = new Date(cachedCode.expiresAt);
-            if (expiresAt < new Date()) {
-                await cacheDelete(codeKey);
-                logger.warn('Cached verification code expired', { email });
-                return res.status(400).json({
-                    success: false,
-                    message: 'Verification code has expired'
-                });
-            }
-
-            // بررسی تطابق کد
-            if (cachedCode.code === code) {
-                // کد صحیح است
-                await handleSuccessfulVerification(email, ip, cachedCode);
-                return res.json(await generateVerificationResponse(email));
-            } else {
-                // کد ناصحیح
-                await handleFailedVerificationAttempt(email, ip, cachedCode, codeKey);
-                return res.status(400).json({
-                    success: false,
-                    message: 'Invalid verification code',
-                    remainingAttempts: verificationCheck.remainingAttempts - 1
-                });
-            }
-        }
-
-        // اگر در کش نبود، از دیتابیس بررسی کن
-        const user = await User.findOne({
-            email: email.toLowerCase(),
-            emailVerificationCode: code,
-            emailVerificationCodeExpires: { $gt: new Date() }
-        });
-
-        if (!user) {
-            // افزایش شمارنده تلاش‌های ناموفق
-            await handleVerificationAttempt(email, ip);
-
-            // دیباگ بیشتر
-            const userForDebug = await User.findOne({ email: email.toLowerCase() });
-            logger.warn('Invalid or expired verification code', {
-                email,
-                storedCode: userForDebug?.emailVerificationCode,
-                enteredCode: code,
-                codeMatches: userForDebug?.emailVerificationCode === code,
-                codeExpired: userForDebug?.emailVerificationCodeExpires! < new Date(),
-                hasCode: !!userForDebug?.emailVerificationCode
-            });
-
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid or expired verification code',
-                remainingAttempts: verificationCheck.remainingAttempts - 1
-            });
-        }
-
-        // کد معتبر است
-        await handleSuccessfulVerification(email, ip, {
-            code,
-            userId: user._id.toString()
-        });
-
-        res.json(await generateVerificationResponse(email, user._id.toString()));
-
-    } catch (error: any) {
-        logger.error('Verify email code error', {
-            error: error.message,
-            stack: error.stack,
-            email: req.body.email
-        });
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
-    }
-};
-
-// تابع کمکی برای پردازش تأیید موفق
-const handleSuccessfulVerification = async (email: string, ip: string, codeData: any) => {
+// Process successful email verification
+const handleSuccessfulVerification = async (email: string, ip: string, codeData: any): Promise<void> => {
     try {
         const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) return;
+        if (!user) {
+            logger.error('User not found during successful verification', { email });
+            return;
+        }
 
-        // تأیید ایمیل در دیتابیس
+        // Update user email verification status in database
         await User.findByIdAndUpdate(user._id, {
             emailVerified: true,
             emailVerificationCode: undefined,
             emailVerificationCodeExpires: undefined
         });
 
-        // 🔥 حذف کد از کش
-        const codeKey = `${CACHE_KEYS.VERIFICATION_CODE}:${email}`;
+        // Remove verification code from cache
+        const codeKey = generateKey.verificationCode(email);
         await cacheDelete(codeKey);
 
-        // 🔥 ریست کردن تلاش‌های ناموفق
+        // Reset failed verification attempts
         await resetVerificationAttempts(email, ip);
 
-        // 🔥 آپدیت وضعیت تأیید در کش
-        const statusKey = `${CACHE_KEYS.USER_VERIFICATION_STATUS}:${user._id.toString()}`;
+        // Update verification status in cache
+        const statusKey = generateKey.userSession(user._id.toString());
         await cacheSet(statusKey, {
             verified: true,
             verifiedAt: new Date().toISOString()
         }, CACHE_TTL.VERY_LONG);
 
-        // 🔥 حذف کش کاربر برای آپدیت اطلاعات
-        const userCacheKey = `user_profile:${email}`;
+        // Clear user profile cache to force refresh
+        const userCacheKey = generateKey.userProfile(email);
         await cacheDelete(userCacheKey);
 
-        // ارسال ایمیل خوش‌آمدگویی
+        // Send welcome email
         await EmailService.sendWelcomeEmail(user.email, user.name);
 
         LoggerService.authLog(user._id.toString(), 'email_verified', {
@@ -381,21 +106,24 @@ const handleSuccessfulVerification = async (email: string, ip: string, codeData:
         });
 
     } catch (error) {
-        logger.error('Error in handleSuccessfulVerification', { email, error });
+        logger.error('Error during successful verification processing', {
+            email,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
     }
 };
 
-// تابع کمکی برای پردازش تلاش ناموفق
-const handleFailedVerificationAttempt = async (email: string, ip: string, cachedCode: any, codeKey: string) => {
+// Process failed verification attempt
+const handleFailedVerificationAttempt = async (email: string, ip: string, cachedCode: any, codeKey: string): Promise<void> => {
     try {
-        // افزایش شمارنده تلاش‌ها در کش
+        // Increment failed attempts counter
         cachedCode.attempts = (cachedCode.attempts || 0) + 1;
 
-        // اگر بیش از 3 بار تلاش ناموفق، کد را حذف کن
+        // Invalidate code if too many failed attempts
         if (cachedCode.attempts >= 3) {
             await cacheDelete(codeKey);
 
-            // آپدیت دیتابیس برای حذف کد
+            // Remove code from database as well
             await User.findOneAndUpdate(
                 { email: email.toLowerCase() },
                 {
@@ -406,22 +134,26 @@ const handleFailedVerificationAttempt = async (email: string, ip: string, cached
 
             logger.warn('Verification code invalidated due to multiple failed attempts', { email });
         } else {
-            // آپدیت کش با شمارنده جدید
+            // Update cache with new attempt count
             await cacheSet(codeKey, cachedCode, 600);
         }
 
-        // افزایش شمارنده تلاش‌های ناموفق
+        // Record the failed attempt for rate limiting
         await handleVerificationAttempt(email, ip);
 
     } catch (error) {
-        logger.error('Error in handleFailedVerificationAttempt', { email, error });
+        logger.error('Error during failed verification attempt processing', {
+            email,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
     }
 };
 
-// تابع کمکی برای تولید پاسخ تأیید
+// Generate verification response with JWT token
 const generateVerificationResponse = async (email: string, userId?: string) => {
     let user = null;
 
+    // Find user by ID or email
     if (userId) {
         user = await User.findById(userId);
     } else {
@@ -429,17 +161,17 @@ const generateVerificationResponse = async (email: string, userId?: string) => {
     }
 
     if (!user) {
-        throw new Error('User not found');
+        throw new Error('User not found during verification response generation');
     }
 
-    // تولید توکن اصلی
+    // Generate main JWT token
     const token = jwt.sign(
         { userId: user._id.toString() },
         process.env.JWT_SECRET!,
         { expiresIn: '120d' }
     );
 
-    // 🔥 ذخیره توکن در کش
+    // Cache the token
     const tokenKey = `${CACHE_KEYS.TEMP_TOKENS}:${user._id.toString()}`;
     await cacheSet(tokenKey, {
         token: token,
@@ -460,6 +192,244 @@ const generateVerificationResponse = async (email: string, userId?: string) => {
     };
 };
 
+export const sendVerificationEmail = async (req: AuthRequest, res: Response) => {
+    try {
+        // Check authentication
+        if (!req.user || !req.user.userId) {
+            logger.warn('No user found in request for email verification');
+            return res.status(401).json({
+                success: false,
+                message: 'Authentication required'
+            });
+        }
+
+        const userId = req.user.userId;
+        const ip = req.ip || 'unknown';
+
+        logger.debug('Sending verification code for user', { userId, ip });
+
+        // Rate limiting for email sending
+        const emailLimitKey = generateKey.rateLimit(`verification_email:${userId}:${ip}`);
+        const emailAttempts = await cacheIncr(emailLimitKey, 300); // 5 minutes TTL
+
+        if (emailAttempts > 3) {
+            logger.warn('Too many verification email requests', { userId, ip, attempts: emailAttempts });
+            return res.status(429).json({
+                success: false,
+                message: 'Too many verification email requests. Please wait 5 minutes before trying again.'
+            });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            logger.warn('User not found for email verification', { userId });
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        logger.debug('User found for email verification', { email: user.email });
+
+        // Check if email is already verified
+        if (user.emailVerified) {
+            logger.warn('Email already verified', { userId, email: user.email });
+            return res.status(400).json({
+                success: false,
+                message: 'Email already verified'
+            });
+        }
+
+        // Generate 6-digit verification code
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        logger.debug('Generated 6-digit verification code', {
+            userId,
+            email: user.email,
+            code: verificationCode
+        });
+
+        // Store code in Redis cache
+        const codeKey = generateKey.verificationCode(user.email);
+        await cacheSet(codeKey, {
+            code: verificationCode,
+            expiresAt: codeExpires.toISOString(),
+            attempts: 0,
+            createdAt: new Date().toISOString()
+        }, 600); // 10 minutes TTL
+
+        // Update user record with verification code
+        await User.findByIdAndUpdate(userId, {
+            emailVerificationCode: verificationCode,
+            emailVerificationCodeExpires: codeExpires,
+            emailVerificationSentAt: new Date()
+        });
+
+        // Send verification email
+        const emailSent = await EmailService.sendVerificationCode(
+            user.email,
+            verificationCode,
+            user.name
+        );
+
+        logger.debug('Email sending result', { emailSent, userId });
+
+        if (!emailSent) {
+            // Remove code from cache if email fails
+            await cacheDelete(codeKey);
+            logger.error('Failed to send verification email', { userId, email: user.email });
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to send verification email. Please try again.'
+            });
+        }
+
+        LoggerService.authLog(userId, 'verification_code_sent', {
+            email: user.email,
+            code: verificationCode
+        });
+
+        logger.info('Verification code sent successfully', {
+            userId,
+            email: user.email
+        });
+
+        res.json({
+            success: true,
+            message: 'Verification code sent successfully. Please check your email.'
+        });
+
+    } catch (error) {
+        logger.error('Send verification email process failed', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : undefined,
+            userId: req.user?.userId
+        });
+        res.status(500).json({
+            success: false,
+            message: 'Server error during verification email process'
+        });
+    }
+};
+
+export const verifyEmailCode = async (req: AuthRequest, res: Response) => {
+    try {
+        const { code, email } = req.body;
+        const ip = req.ip || 'unknown';
+
+        logger.debug('Verifying email code', { email, codeLength: code?.length, ip });
+
+        // Validate input
+        if (!code || code.length !== 6) {
+            logger.warn('Invalid verification code format', { codeLength: code?.length });
+            return res.status(400).json({
+                success: false,
+                message: 'Valid 6-digit verification code is required'
+            });
+        }
+
+        if (!email) {
+            logger.warn('Email missing for verification');
+            return res.status(400).json({
+                success: false,
+                message: 'Email address is required'
+            });
+        }
+
+        // Check rate limiting
+        const verificationCheck = await handleVerificationAttempt(email, ip);
+        if (verificationCheck.blocked) {
+            return res.status(429).json({
+                success: false,
+                message: 'Too many failed verification attempts. Please wait 30 minutes before trying again.'
+            });
+        }
+
+        // Check cache for verification code first
+        const codeKey = generateKey.verificationCode(email);
+        const cachedCode = await cacheGet(codeKey);
+
+        if (cachedCode) {
+            // Check if cached code has expired
+            const expiresAt = new Date(cachedCode.expiresAt);
+            if (expiresAt < new Date()) {
+                await cacheDelete(codeKey);
+                logger.warn('Cached verification code expired', { email });
+                return res.status(400).json({
+                    success: false,
+                    message: 'Verification code has expired. Please request a new one.'
+                });
+            }
+
+            // Verify code matches
+            if (cachedCode.code === code) {
+                // Code is correct - process successful verification
+                await handleSuccessfulVerification(email, ip, cachedCode);
+                const response = await generateVerificationResponse(email, cachedCode.userId);
+                return res.json(response);
+            } else {
+                // Code is incorrect - process failed attempt
+                await handleFailedVerificationAttempt(email, ip, cachedCode, codeKey);
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid verification code',
+                    remainingAttempts: verificationCheck.remainingAttempts - 1
+                });
+            }
+        }
+
+        // If not in cache, check database
+        const user = await User.findOne({
+            email: email.toLowerCase(),
+            emailVerificationCode: code,
+            emailVerificationCodeExpires: { $gt: new Date() }
+        });
+
+        if (!user) {
+            // Increment failed attempts counter
+            await handleVerificationAttempt(email, ip);
+
+            // Debug information
+            const userForDebug = await User.findOne({ email: email.toLowerCase() });
+            logger.warn('Invalid or expired verification code', {
+                email,
+                storedCode: userForDebug?.emailVerificationCode,
+                enteredCode: code,
+                codeMatches: userForDebug?.emailVerificationCode === code,
+                codeExpired: userForDebug?.emailVerificationCodeExpires! < new Date(),
+                hasCode: !!userForDebug?.emailVerificationCode
+            });
+
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or expired verification code',
+                remainingAttempts: verificationCheck.remainingAttempts - 1
+            });
+        }
+
+        // Valid code found in database
+        await handleSuccessfulVerification(email, ip, {
+            code,
+            userId: user._id.toString()
+        });
+
+        const response = await generateVerificationResponse(email, user._id.toString());
+        res.json(response);
+
+    } catch (error) {
+        logger.error('Email verification process failed', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : undefined,
+            email: req.body.email
+        });
+        res.status(500).json({
+            success: false,
+            message: 'Server error during email verification process'
+        });
+    }
+};
+
 export const resendVerification = async (req: AuthRequest, res: Response) => {
     try {
         const { email } = req.body;
@@ -469,23 +439,19 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             logger.warn('Resend verification - email missing');
             return res.status(400).json({
                 success: false,
-                message: 'Email is required'
+                message: 'Email address is required'
             });
         }
 
-        // 🔥 بررسی rate limiting برای ارسال مجدد
-        const resendLimitKey = `${CACHE_KEYS.VERIFICATION_ATTEMPTS}:resend:${email}:${ip}`;
-        const resendAttempts = await redisClient.incr(resendLimitKey);
-
-        if (resendAttempts === 1) {
-            await redisClient.expire(resendLimitKey, 300); // 5 دقیقه
-        }
+        // Rate limiting for resend requests
+        const resendLimitKey = generateKey.rateLimit(`resend_verification:${email}:${ip}`);
+        const resendAttempts = await cacheIncr(resendLimitKey, 300); // 5 minutes TTL
 
         if (resendAttempts > 2) {
             logger.warn('Too many resend verification requests', { email, ip, attempts: resendAttempts });
             return res.status(429).json({
                 success: false,
-                message: 'تعداد درخواست‌های ارسال مجدد کد بیش از حد مجاز است. لطفاً 5 دقیقه دیگر تلاش کنید.'
+                message: 'Too many resend requests. Please wait 5 minutes before trying again.'
             });
         }
 
@@ -506,9 +472,9 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // بررسی rate limiting در دیتابیس
+        // Check rate limiting in database (time between sends)
         const lastSent = user.emailVerificationSentAt;
-        if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) { // 2 دقیقه
+        if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) { // 2 minutes
             logger.warn('Resend verification - too frequent', {
                 email,
                 lastSent: lastSent.toISOString()
@@ -519,27 +485,27 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // تولید کد جدید
+        // Generate new verification code
         const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const codeExpires = new Date(Date.now() + 10 * 60 * 1000);
+        const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-        // 🔥 ذخیره کد جدید در کش
-        const codeKey = `${CACHE_KEYS.VERIFICATION_CODE}:${email}`;
+        // Store new code in cache
+        const codeKey = generateKey.verificationCode(email);
         await cacheSet(codeKey, {
             code: verificationCode,
             expiresAt: codeExpires.toISOString(),
             attempts: 0,
             createdAt: new Date().toISOString()
-        }, 600);
+        }, 600); // 10 minutes TTL
 
-        // آپدیت کاربر
+        // Update user record
         await User.findByIdAndUpdate(user._id, {
             emailVerificationCode: verificationCode,
             emailVerificationCodeExpires: codeExpires,
             emailVerificationSentAt: new Date()
         });
 
-        // ارسال ایمیل
+        // Send verification email
         const emailSent = await EmailService.sendVerificationCode(
             user.email,
             verificationCode,
@@ -547,7 +513,7 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
         );
 
         if (!emailSent) {
-            // حذف کد از کش اگر ایمیل ارسال نشد
+            // Remove code from cache if email fails
             await cacheDelete(codeKey);
             logger.error('Resend verification - failed to send email', { email });
             return res.status(500).json({
@@ -570,30 +536,30 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             message: 'Verification code sent successfully'
         });
 
-    } catch (error: any) {
-        logger.error('Resend verification code error', {
-            error: error.message,
-            stack: error.stack,
+    } catch (error) {
+        logger.error('Resend verification process failed', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : undefined,
             email: req.body.email
         });
         res.status(500).json({
             success: false,
-            message: 'Server error'
+            message: 'Server error during resend verification process'
         });
     }
 };
 
-// 🆕 تابع برای بررسی وضعیت تأیید ایمیل از کش
+// Get verification status from cache
 export const getVerificationStatus = async (userId: string): Promise<{ verified: boolean; verifiedAt?: string }> => {
     try {
-        const statusKey = `${CACHE_KEYS.USER_VERIFICATION_STATUS}:${userId}`;
+        const statusKey = generateKey.userSession(userId);
         const cachedStatus = await cacheGet(statusKey);
 
         if (cachedStatus) {
             return cachedStatus;
         }
 
-        // اگر در کش نبود، از دیتابیس بگیر
+        // If not in cache, check database
         const user = await User.findById(userId).select('emailVerified emailVerificationSentAt');
         if (!user) {
             return { verified: false };
@@ -604,24 +570,27 @@ export const getVerificationStatus = async (userId: string): Promise<{ verified:
             verifiedAt: user.emailVerified ? user.emailVerificationSentAt?.toISOString() : undefined
         };
 
-        // ذخیره در کش
+        // Cache the status for future requests
         await cacheSet(statusKey, status, CACHE_TTL.LONG);
 
         return status;
     } catch (error) {
-        logger.error('Error getting verification status', { userId, error });
+        logger.error('Failed to get verification status', {
+            userId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
         return { verified: false };
     }
 };
 
-// 🆕 تابع برای حذف تمام کش‌های مربوط به تأیید ایمیل
+// Invalidate all verification-related cache
 export const invalidateVerificationCache = async (email: string, userId?: string): Promise<void> => {
     try {
-        const keysToDelete = [];
+        const keysToDelete: string[] = [];
 
         if (email) {
             keysToDelete.push(
-                `${CACHE_KEYS.VERIFICATION_CODE}:${email}`,
+                generateKey.verificationCode(email),
                 `${CACHE_KEYS.VERIFICATION_ATTEMPTS}:${email}:*`,
                 `${CACHE_KEYS.BLOCKED_VERIFICATION}:${email}:*`,
                 `${CACHE_KEYS.VERIFICATION_ATTEMPTS}:send:*:${email}`,
@@ -631,12 +600,12 @@ export const invalidateVerificationCache = async (email: string, userId?: string
 
         if (userId) {
             keysToDelete.push(
-                `${CACHE_KEYS.USER_VERIFICATION_STATUS}:${userId}`,
+                generateKey.userSession(userId),
                 `${CACHE_KEYS.TEMP_TOKENS}:${userId}`
             );
         }
 
-        // حذف کلیدهای pattern-based
+        // Delete pattern-based keys
         for (const pattern of keysToDelete.filter(k => k.includes('*'))) {
             const matchingKeys = await redisClient.keys(pattern);
             if (matchingKeys.length > 0) {
@@ -644,15 +613,19 @@ export const invalidateVerificationCache = async (email: string, userId?: string
             }
         }
 
-        // حذف کلیدهای مستقیم
+        // Delete direct keys
         const directKeys = keysToDelete.filter(k => !k.includes('*'));
         if (directKeys.length > 0) {
             await redisClient.del(directKeys);
         }
 
-        logger.debug('Verification cache invalidated', { email, userId });
+        logger.debug('Verification cache invalidated successfully', { email, userId });
 
     } catch (error) {
-        logger.error('Error invalidating verification cache', { email, userId, error });
+        logger.error('Failed to invalidate verification cache', {
+            email,
+            userId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
     }
 };

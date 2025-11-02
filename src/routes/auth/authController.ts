@@ -1,4 +1,4 @@
-// backend/src/controllers/authController.ts - بهینه‌سازی شده با Redis
+// backend/src/controllers/authController.ts - Optimized with cache utilities
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
@@ -9,73 +9,37 @@ import { logger } from '../../config/logger';
 import { AuthRequest } from '../../middlewares/auth';
 import { EmailService } from '../../services/emailService';
 import { redisClient } from '../../config/redis';
+import {
+  cacheGet,
+  cacheSet,
+  cacheDelete,
+  cacheIncr,
+  clearUserCache,
+  clearAuthCache,
+  clearUserCacheByEmail,
+  generateKey,
+  CACHE_TTL,
+  CACHE_KEYS
+} from '../../utils/cacheUtils';
 
-// کلیدهای کش
-const CACHE_KEYS = {
-  USER_PROFILE: 'user_profile',
-  LOGIN_ATTEMPTS: 'login_attempts',
-  TEMP_TOKENS: 'temp_tokens',
-  BLOCKED_USERS: 'blocked_users'
-};
-
-// زمان انقضای کش (ثانیه)
-const CACHE_TTL = {
-  SHORT: 300,      // 5 دقیقه
-  MEDIUM: 1800,    // 30 دقیقه
-  LONG: 86400,     // 24 ساعت
-  VERY_LONG: 604800 // 7 روز
-};
-
-// توابع کمکی کش
-const cacheGet = async (key: string): Promise<any> => {
-  try {
-    const cached = await redisClient.get(key);
-    return cached ? JSON.parse(cached) : null;
-  } catch (error) {
-    logger.error('Cache get error', { key, error });
-    return null;
-  }
-};
-
-const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
-  try {
-    await redisClient.setEx(key, ttl, JSON.stringify(data));
-  } catch (error) {
-    logger.error('Cache set error', { key, error });
-  }
-};
-
-const cacheDelete = async (key: string): Promise<void> => {
-  try {
-    await redisClient.del(key);
-  } catch (error) {
-    logger.error('Cache delete error', { key, error });
-  }
-};
-
-// تابع برای مدیریت تلاش‌های ناموفق لاگین
+// Manage failed login attempts
 const handleFailedLogin = async (email: string, ip: string): Promise<{ blocked: boolean; remainingAttempts: number }> => {
-  const attemptKey = `${CACHE_KEYS.LOGIN_ATTEMPTS}:${email}:${ip}`;
-  const blockKey = `${CACHE_KEYS.BLOCKED_USERS}:${email}:${ip}`;
+  const attemptKey = generateKey.rateLimit(`login:${email}:${ip}`);
+  const blockKey = generateKey.rateLimit(`blocked:${email}:${ip}`);
 
-  // بررسی اگر کاربر بلاک شده
-  const isBlocked = await redisClient.get(blockKey);
+  // Check if user is blocked
+  const isBlocked = await cacheGet(blockKey);
   if (isBlocked) {
     return { blocked: true, remainingAttempts: 0 };
   }
 
-  // افزایش تعداد تلاش‌ها
-  const attempts = await redisClient.incr(attemptKey);
+  // Increment attempt counter
+  const attempts = await cacheIncr(attemptKey, 900); // 15 minutes TTL
 
-  // اگر اولین تلاش است، TTL تنظیم کن
-  if (attempts === 1) {
-    await redisClient.expire(attemptKey, 900); // 15 دقیقه
-  }
-
-  // اگر بیش از 5 تلاش ناموفق، کاربر را بلاک کن
+  // Block if exceeded maximum attempts
   if (attempts >= 5) {
-    await redisClient.setEx(blockKey, 1800, 'blocked'); // 30 دقیقه بلاک
-    await redisClient.del(attemptKey);
+    await cacheSet(blockKey, 'blocked', 1800); // 30 minutes block
+    await cacheDelete(attemptKey);
 
     logger.warn('User temporarily blocked due to failed login attempts', {
       email,
@@ -89,14 +53,14 @@ const handleFailedLogin = async (email: string, ip: string): Promise<{ blocked: 
   return { blocked: false, remainingAttempts: 5 - attempts };
 };
 
-// تابع برای ریست کردن تلاش‌های ناموفق
+// Reset failed login attempts on successful login
 const resetFailedLogin = async (email: string, ip: string): Promise<void> => {
-  const attemptKey = `${CACHE_KEYS.LOGIN_ATTEMPTS}:${email}:${ip}`;
-  const blockKey = `${CACHE_KEYS.BLOCKED_USERS}:${email}:${ip}`;
+  const attemptKey = generateKey.rateLimit(`login:${email}:${ip}`);
+  const blockKey = generateKey.rateLimit(`blocked:${email}:${ip}`);
 
   await Promise.all([
-    redisClient.del(attemptKey),
-    redisClient.del(blockKey)
+    cacheDelete(attemptKey),
+    cacheDelete(blockKey)
   ]);
 };
 
@@ -104,40 +68,44 @@ export const register = async (req: AuthRequest, res: Response) => {
   try {
     const { name, email, password, rememberMe } = req.body;
 
-    logger.debug('Registration attempt', { email, name, rememberMe });
+    logger.debug('Registration attempt received', { email, name, rememberMe });
 
-    // بررسی کش برای کاربر موجود
-    const userProfileKey = `${CACHE_KEYS.USER_PROFILE}:${email}`;
+    // Check cache for existing user
+    const userProfileKey = generateKey.userProfile(email);
     const existingUserCached = await cacheGet(userProfileKey);
 
     if (existingUserCached) {
       LoggerService.authLog('unknown', 'registration_failed', { reason: 'user_exists', email });
-      res.status(400).json({ message: 'User already exists' });
-      return;
+      return res.status(400).json({
+        success: false,
+        message: 'User with this email already exists'
+      });
     }
 
-    // Check if user exists in database
+    // Check database for existing user
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      // ذخیره در کش برای جلوگیری از چک‌های تکراری
+      // Cache existence to prevent duplicate checks
       await cacheSet(userProfileKey, { exists: true }, CACHE_TTL.SHORT);
 
       LoggerService.authLog('unknown', 'registration_failed', { reason: 'user_exists', email });
-      res.status(400).json({ message: 'User already exists' });
-      return;
+      return res.status(400).json({
+        success: false,
+        message: 'User with this email already exists'
+      });
     }
 
-    // Hash password
+    // Hash password with pepper for additional security
     const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
       .update(password)
       .digest('hex');
     const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-    // تولید کد تأیید
+    // Generate 6-digit verification code
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 دقیقه
+    const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Create user با emailVerified: false
+    // Create new user with unverified email
     const user = new User({
       name,
       email,
@@ -150,7 +118,7 @@ export const register = async (req: AuthRequest, res: Response) => {
 
     await user.save();
 
-    // 🔥 ذخیره اطلاعات کاربر در کش
+    // Cache user information
     await cacheSet(userProfileKey, {
       id: user._id.toString(),
       name: user.name,
@@ -158,7 +126,7 @@ export const register = async (req: AuthRequest, res: Response) => {
       emailVerified: user.emailVerified
     }, CACHE_TTL.MEDIUM);
 
-    // ارسال ایمیل تأیید
+    // Send verification email
     const emailSent = await EmailService.sendVerificationCode(
       user.email,
       verificationCode,
@@ -166,15 +134,16 @@ export const register = async (req: AuthRequest, res: Response) => {
     );
 
     if (!emailSent) {
-      // اگر ایمیل ارسال نشد، کاربر رو پاک کن و کش رو حذف کن
+      // Rollback user creation if email fails
       await User.findByIdAndDelete(user._id);
       await cacheDelete(userProfileKey);
       return res.status(500).json({
+        success: false,
         message: 'Failed to send verification email. Please try again.'
       });
     }
 
-    // 🔥 تولید توکن موقت و ذخیره در Redis
+    // Generate temporary token for email verification flow
     const tempToken = jwt.sign(
       {
         userId: user._id.toString(),
@@ -185,13 +154,13 @@ export const register = async (req: AuthRequest, res: Response) => {
       { expiresIn: '1h' }
     );
 
-    // ذخیره توکن موقت در Redis
-    const tempTokenKey = `${CACHE_KEYS.TEMP_TOKENS}:${user._id.toString()}`;
+    // Cache temporary token
+    const tempTokenKey = generateKey.userSession(user._id.toString());
     await cacheSet(tempTokenKey, {
       token: tempToken,
       type: 'email_verification',
       createdAt: new Date().toISOString()
-    }, 3600); // 1 ساعت
+    }, 3600); // 1 hour TTL
 
     LoggerService.authLog(user._id.toString(), 'registration_pending', {
       emailVerified: false
@@ -203,7 +172,8 @@ export const register = async (req: AuthRequest, res: Response) => {
     });
 
     res.status(201).json({
-      message: 'Registration successful. Please verify your email.',
+      success: true,
+      message: 'Registration successful. Please check your email for verification code.',
       tempToken,
       user: {
         id: user._id.toString(),
@@ -213,8 +183,15 @@ export const register = async (req: AuthRequest, res: Response) => {
       }
     });
   } catch (error) {
-    logger.error('Registration error', { error, email: req.body.email });
-    res.status(500).json({ message: 'Server error', error });
+    logger.error('Registration process failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      email: req.body.email
+    });
+    res.status(500).json({
+      success: false,
+      message: 'Server error during registration process',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 };
 
@@ -223,28 +200,35 @@ export const login = async (req: AuthRequest, res: Response) => {
     const { email, password, rememberMe } = req.body;
     const ip = req.ip || 'unknown';
 
-    logger.debug('Login attempt', { email, rememberMe, ip });
+    logger.debug('Login attempt received', { email, rememberMe, ip });
 
-    // 🔥 بررسی بلاک شدن کاربر
+    // Check rate limiting and blocking
     const loginCheck = await handleFailedLogin(email, ip);
     if (loginCheck.blocked) {
       return res.status(429).json({
-        message: 'اکانت شما به دلیل تلاش‌های ناموفق متعدد موقتاً مسدود شده است. لطفاً 30 دقیقه دیگر تلاش کنید.'
+        success: false,
+        message: 'Your account has been temporarily blocked due to multiple failed login attempts. Please try again in 30 minutes.'
       });
     }
 
-    // 🔥 بررسی کش برای اطلاعات کاربر
-    const userProfileKey = `${CACHE_KEYS.USER_PROFILE}:${email}`;
+    // Check cache for user information
+    const userProfileKey = generateKey.userProfile(email);
     let user = await cacheGet(userProfileKey);
 
     if (!user) {
-      // اگر در کش نیست، از دیتابیس بگیر
+      // Fetch from database if not in cache
       const dbUser = await User.findOne({ email });
       if (!dbUser) {
         LoggerService.authLog('unknown', 'login_failed', { reason: 'user_not_found', email });
         logger.warn('Login failed - user not found', { email });
-        res.status(400).json({ message: 'Invalid credentials' });
-        return;
+
+        // Increment failed attempts
+        await handleFailedLogin(email, ip);
+
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid email or password'
+        });
       }
 
       user = {
@@ -257,17 +241,17 @@ export const login = async (req: AuthRequest, res: Response) => {
         role: dbUser.role
       };
 
-      // ذخیره در کش
+      // Cache user information for future requests
       await cacheSet(userProfileKey, user, CACHE_TTL.MEDIUM);
     }
 
-    // 🔥 چک کردن تأیید ایمیل
+    // Check if email is verified
     if (!user.emailVerified) {
       LoggerService.authLog(user.id, 'login_failed', {
         reason: 'email_not_verified'
       });
 
-      // ارسال مجدد کد تأیید
+      // Generate and send new verification code
       const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
       const codeExpires = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -279,19 +263,20 @@ export const login = async (req: AuthRequest, res: Response) => {
 
       await EmailService.sendVerificationCode(user.email, verificationCode, user.name);
 
-      // 🔥 آپدیت کش
+      // Update cache with new verification code
       await cacheSet(userProfileKey, {
         ...user,
         emailVerificationCode: verificationCode
       }, CACHE_TTL.SHORT);
 
       return res.status(403).json({
+        success: false,
         message: 'email-not-verified',
         email: user.email
       });
     }
 
-    // Check password
+    // Verify password with pepper
     const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
       .update(password)
       .digest('hex');
@@ -301,17 +286,19 @@ export const login = async (req: AuthRequest, res: Response) => {
       LoggerService.authLog(user.id, 'login_failed', { reason: 'invalid_password' });
       logger.warn('Login failed - invalid password', { userId: user.id, email });
 
-      // افزایش شمارنده تلاش‌های ناموفق
+      // Increment failed attempts counter
       await handleFailedLogin(email, ip);
 
-      res.status(400).json({ message: 'invalid-password' });
-      return;
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
     }
 
-    // 🔥 اگر پسورد صحیح است، ریست کردن تلاش‌های ناموفق
+    // Reset failed attempts on successful login
     await resetFailedLogin(email, ip);
 
-    // 🔥 فقط اگر ایمیل تأیید شده باشد، توکن اصلی تولید کن
+    // Generate JWT token
     const expiresIn = rememberMe ? '120d' : '1d';
     const token = jwt.sign(
       { userId: user.id },
@@ -319,10 +306,10 @@ export const login = async (req: AuthRequest, res: Response) => {
       { expiresIn }
     );
 
-    // آپدیت lastLogin در دیتابیس
+    // Update last login timestamp
     await User.findByIdAndUpdate(user.id, { lastLogin: new Date() });
 
-    // 🔥 آپدیت کش
+    // Update cache with latest user data
     await cacheSet(userProfileKey, {
       ...user,
       lastLogin: new Date().toISOString()
@@ -336,6 +323,7 @@ export const login = async (req: AuthRequest, res: Response) => {
     });
 
     res.json({
+      success: true,
       message: 'Login successful',
       token,
       expiresIn,
@@ -347,8 +335,15 @@ export const login = async (req: AuthRequest, res: Response) => {
       }
     });
   } catch (error) {
-    logger.error('Login error', { error, email: req.body.email });
-    res.status(500).json({ message: 'Server error', error });
+    logger.error('Login process failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      email: req.body.email
+    });
+    res.status(500).json({
+      success: false,
+      message: 'Server error during login process',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 };
 
@@ -358,41 +353,45 @@ export const checkToken = async (req: AuthRequest, res: Response) => {
     const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
-      logger.warn('Token check failed - no token provided');
-      res.status(401).json({ valid: false, message: 'No token provided' });
-      return;
+      logger.warn('Token validation failed - no token provided');
+      return res.status(401).json({
+        valid: false,
+        message: 'No authentication token provided'
+      });
     }
 
-    // 🔥 بررسی کش برای توکن
+    // Check cache for token validation
     const tokenKey = `${CACHE_KEYS.TEMP_TOKENS}:${req.userId}`;
     const cachedToken = await cacheGet(tokenKey);
 
     if (cachedToken && cachedToken.token === token) {
       logger.debug('Token validated from cache', { userId: req.userId });
-      res.json({
+      return res.json({
         valid: true,
         message: 'Token is valid',
         userId: req.userId,
         fromCache: true
       });
-      return;
     }
 
+    // Verify token with JWT
     jwt.verify(token, process.env.JWT_SECRET!, (err: any, decoded: any) => {
       if (err) {
-        logger.warn('Token check failed - invalid token', { error: err.message });
-        res.status(401).json({ valid: false, message: 'Invalid token' });
-        return;
+        logger.warn('Token validation failed - invalid token', { error: err.message });
+        return res.status(401).json({
+          valid: false,
+          message: 'Invalid or expired token'
+        });
       }
 
-      // 🔥 ذخیره توکن معتبر در کش
+      // Cache valid token for future validations
       cacheSet(tokenKey, {
         token: token,
         type: 'access_token',
         validatedAt: new Date().toISOString()
       }, CACHE_TTL.SHORT).catch(() => { });
 
-      logger.debug('Token check successful', { userId: decoded.userId });
+      logger.debug('Token validation successful', { userId: decoded.userId });
       res.json({
         valid: true,
         message: 'Token is valid',
@@ -401,24 +400,28 @@ export const checkToken = async (req: AuthRequest, res: Response) => {
       });
     });
   } catch (error) {
-    logger.error('Token check error:', error);
-    res.status(500).json({ valid: false, message: 'Server error' });
+    logger.error('Token validation process failed', {
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+    res.status(500).json({
+      valid: false,
+      message: 'Server error during token validation'
+    });
   }
 };
 
-// 🆕 تابع برای لاگ‌آوت و حذف کش
 export const logout = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId;
     const token = req.headers['authorization']?.split(' ')[1];
 
     if (userId && token) {
-      // حذف توکن از کش
+      // Clear token from cache
       const tokenKey = `${CACHE_KEYS.TEMP_TOKENS}:${userId}`;
       await cacheDelete(tokenKey);
 
-      // حذف پروفایل کاربر از کش (اختیاری - بستگی به استراتژی کش دارد)
-      // await cacheDelete(`${CACHE_KEYS.USER_PROFILE}:${userId}`);
+      // Clear user session
+      await clearAuthCache(userId, 'user');
     }
 
     LoggerService.authLog(userId || 'unknown', 'logout_success');
@@ -429,18 +432,21 @@ export const logout = async (req: AuthRequest, res: Response) => {
     });
 
   } catch (error) {
-    logger.error('Logout error', { error, userId: req.userId });
+    logger.error('Logout process failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.userId
+    });
     res.status(500).json({
       success: false,
-      message: 'Server error during logout'
+      message: 'Server error during logout process'
     });
   }
 };
 
-// 🆕 تابع برای دریافت اطلاعات کاربر از کش
+// Utility function to get user from cache
 export const getUserFromCache = async (userId: string): Promise<any> => {
   try {
-    // جستجو در تمام کلیدهای کش برای پیدا کردن کاربر
+    // Search through cache keys to find user
     const keys = await redisClient.keys(`${CACHE_KEYS.USER_PROFILE}:*`);
 
     for (const key of keys) {
@@ -451,39 +457,30 @@ export const getUserFromCache = async (userId: string): Promise<any> => {
     }
     return null;
   } catch (error) {
-    logger.error('Error getting user from cache', { userId, error });
+    logger.error('Failed to get user from cache', {
+      userId,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
     return null;
   }
 };
 
-// 🆕 تابع برای حذف کاربر از کش
+// Utility function to invalidate user authentication cache
 export const invalidateUserAuthCache = async (userId: string, email?: string): Promise<void> => {
   try {
-    const keysToDelete = [];
-
-    if (userId) {
-      keysToDelete.push(`${CACHE_KEYS.TEMP_TOKENS}:${userId}`);
-    }
-
     if (email) {
-      keysToDelete.push(`${CACHE_KEYS.USER_PROFILE}:${email}`);
+      await clearUserCacheByEmail(email);
+    }
+    if (userId) {
+      await clearUserCache(userId);
     }
 
-    // حذف کلیدهای لاگین ناموفق مربوط به این ایمیل
-    const failedLoginKeys = await redisClient.keys(`${CACHE_KEYS.LOGIN_ATTEMPTS}:${email}:*`);
-    const blockedKeys = await redisClient.keys(`${CACHE_KEYS.BLOCKED_USERS}:${email}:*`);
-
-    keysToDelete.push(...failedLoginKeys, ...blockedKeys);
-
-    if (keysToDelete.length > 0) {
-      await redisClient.del(keysToDelete);
-      logger.debug('User auth cache invalidated', {
-        userId,
-        email,
-        keysCount: keysToDelete.length
-      });
-    }
+    logger.debug('User authentication cache invalidated successfully', { userId, email });
   } catch (error) {
-    logger.error('Error invalidating user auth cache', { userId, email, error });
+    logger.error('Failed to invalidate user authentication cache', {
+      userId,
+      email,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 };

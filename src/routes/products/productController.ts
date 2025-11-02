@@ -1,189 +1,166 @@
-// backend/src/controllers/productController.ts - بهینه‌سازی شده با Redis
+// backend/src/controllers/productController.ts - Completely rewritten
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import Product from '../../models/product';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import { deleteFile, getFileUrl } from '../../config/multerConfig';
-import { redisClient } from '../../config/redis';
+import {
+    cacheGet,
+    cacheSet,
+    cacheDelete,
+    clearProductCache,
+    generateKey,
+    CACHE_TTL,
+    cacheWithFallback
+} from '../../utils/cacheUtils';
 
-// کلیدهای کش
+// Cache key constants
 const CACHE_KEYS = {
     FEATURED: 'featured_products',
     MENU: 'menu_products',
     POPULAR: 'popular_products',
     PRODUCT_DETAIL: 'product_detail',
-    SEARCH: 'product_search'
+    SEARCH: 'product_search',
+    CATEGORIES: 'product_categories'
 };
 
-// زمان انقضای کش (ثانیه)
-const CACHE_TTL = {
-    SHORT: 300, // 5 دقیقه
-    MEDIUM: 600, // 10 دقیقه
-    LONG: 1800 // 30 دقیقه
-};
-
-// تابع کمکی برای کش کردن
-const cacheGet = async (key: string): Promise<any> => {
-    try {
-        const cached = await redisClient.get(key);
-        return cached ? JSON.parse(cached) : null;
-    } catch (error) {
-        logger.error('Cache get error', { key, error });
-        return null;
-    }
-};
-
-// تابع کمکی برای ذخیره در کش
-const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
-    try {
-        await redisClient.setEx(key, ttl, JSON.stringify(data));
-    } catch (error) {
-        logger.error('Cache set error', { key, error });
-    }
-};
-
-// تابع کمکی برای حذف کش مرتبط
-const invalidateProductCache = async (): Promise<void> => {
-    try {
-        const keys = await redisClient.keys(`${CACHE_KEYS.FEATURED}:*`);
-        const menuKeys = await redisClient.keys(`${CACHE_KEYS.MENU}:*`);
-        const popularKeys = await redisClient.keys(`${CACHE_KEYS.POPULAR}:*`);
-
-        const allKeys = [...keys, ...menuKeys, ...popularKeys];
-
-        if (allKeys.length > 0) {
-            await redisClient.del(allKeys);
-            logger.debug('Product cache invalidated', { keysCount: allKeys.length });
-        }
-    } catch (error) {
-        logger.error('Cache invalidation error', { error });
-    }
-};
-
-// 🆕 تابع برای صفحه home - بخش offer (محصولات ویژه)
 export const getFeaturedProducts = async (req: AuthRequest, res: Response) => {
     try {
         const { limit = 8 } = req.query;
         const cacheKey = `${CACHE_KEYS.FEATURED}:${limit}`;
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            logger.debug('Serving featured products from cache', { cacheKey });
-            return res.json({
-                success: true,
-                products: cached,
-                section: 'offer',
-                fromCache: true
-            });
-        }
+        const products = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const featuredProducts = await Product.find({
+                    isActive: true,
+                    isFeatured: true,
+                    inStock: true
+                })
+                    .populate('createdBy', 'name email')
+                    .select('name price originalPrice images category roastLevel flavorProfile description weight')
+                    .sort({ createdAt: -1 })
+                    .limit(Number(limit));
 
-        const products = await Product.find({
-            isActive: true,
-            isFeatured: true,
-            inStock: true
-        })
-            .populate('createdBy', 'name')
-            .select('name price originalPrice images category roastLevel flavorProfile description')
-            .sort({ createdAt: -1 })
-            .limit(Number(limit));
+                return featuredProducts;
+            },
+            CACHE_TTL.SHORT
+        );
 
-        // ذخیره در کش
-        await cacheSet(cacheKey, products, CACHE_TTL.SHORT);
+        logger.debug('Featured products retrieved successfully', {
+            count: products.length,
+            fromCache: true // This is handled internally by cacheWithFallback
+        });
 
         res.json({
             success: true,
             products,
-            section: 'offer',
-            fromCache: false
+            section: 'featured',
+            count: products.length
         });
 
     } catch (error: any) {
-        LoggerService.errorLog('getFeaturedProducts', error);
+        LoggerService.errorLog('getFeaturedProducts', error, {
+            query: req.query,
+            userId: req.userId
+        });
+
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت محصولات ویژه',
-            error: error.message
+            message: 'Failed to retrieve featured products',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
 
-// 🆕 تابع برای صفحه home - بخش menu (محصولات معمولی)
 export const getMenuProducts = async (req: AuthRequest, res: Response) => {
     try {
         const {
             page = 1,
             limit = 12,
             category,
-            roastLevel
+            roastLevel,
+            minPrice,
+            maxPrice,
+            sortBy = 'createdAt',
+            sortOrder = 'desc'
         } = req.query;
 
-        const cacheKey = `${CACHE_KEYS.MENU}:${page}:${limit}:${category}:${roastLevel}`;
+        const cacheKey = `${CACHE_KEYS.MENU}:${page}:${limit}:${category}:${roastLevel}:${minPrice}:${maxPrice}:${sortBy}:${sortOrder}`;
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            logger.debug('Serving menu products from cache', { cacheKey });
-            return res.json({
-                ...cached,
-                fromCache: true
-            });
-        }
+        const responseData = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const filter: any = {
+                    isActive: true,
+                    isFeatured: false,
+                    inStock: true
+                };
 
-        const filter: any = {
-            isActive: true,
-            isFeatured: false,
-            inStock: true
-        };
+                // Apply filters
+                if (category) filter.category = category;
+                if (roastLevel) filter.roastLevel = roastLevel;
 
-        if (category) filter.category = category;
-        if (roastLevel) filter.roastLevel = roastLevel;
+                // Price range filter
+                if (minPrice || maxPrice) {
+                    filter.price = {};
+                    if (minPrice) filter.price.$gte = parseFloat(minPrice as string);
+                    if (maxPrice) filter.price.$lte = parseFloat(maxPrice as string);
+                }
 
-        const products = await Product.find(filter)
-            .populate('createdBy', 'name')
-            .select('name price originalPrice images category roastLevel flavorProfile weight description')
-            .sort({ createdAt: -1 })
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
+                // Sort configuration
+                const sort: any = {};
+                sort[sortBy as string] = sortOrder === 'asc' ? 1 : -1;
 
-        const total = await Product.countDocuments(filter);
+                const products = await Product.find(filter)
+                    .populate('createdBy', 'name email')
+                    .select('name price originalPrice images category roastLevel flavorProfile weight description inStock')
+                    .sort(sort)
+                    .limit(Number(limit))
+                    .skip((Number(page) - 1) * Number(limit));
 
-        // 🆕 گرفتن محصولات پرطرفدار برای بخش بالای منو
-        const popularProducts = await getPopularProductsForMenu();
+                const total = await Product.countDocuments(filter);
 
-        const responseData = {
-            success: true,
-            popularProducts,
-            regularProducts: products,
-            pagination: {
-                total,
-                page: Number(page),
-                limit: Number(limit),
-                totalPages: Math.ceil(total / Number(limit))
+                // Get popular products for menu section
+                const popularProducts = await getPopularProductsForMenu(6);
+
+                return {
+                    success: true,
+                    popularProducts,
+                    regularProducts: products,
+                    pagination: {
+                        total,
+                        page: Number(page),
+                        limit: Number(limit),
+                        totalPages: Math.ceil(total / Number(limit))
+                    },
+                    filters: {
+                        category,
+                        roastLevel,
+                        priceRange: { min: minPrice, max: maxPrice }
+                    }
+                };
             },
-            section: 'menu'
-        };
+            CACHE_TTL.MEDIUM
+        );
 
-        // ذخیره در کش
-        await cacheSet(cacheKey, responseData, CACHE_TTL.MEDIUM);
-
-        res.json({
-            ...responseData,
-            fromCache: false
-        });
+        res.json(responseData);
 
     } catch (error: any) {
-        LoggerService.errorLog('getMenuProducts', error);
+        LoggerService.errorLog('getMenuProducts', error, {
+            query: req.query,
+            userId: req.userId
+        });
+
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت محصولات منو',
-            error: error.message
+            message: 'Failed to retrieve menu products',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
 
-// 🆕 تابع برای جستجو در منو (صفحه home)
 export const searchProducts = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -194,121 +171,588 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
             roastLevel
         } = req.query;
 
-        if (!query) {
+        if (!query || (query as string).trim().length < 2) {
             return res.status(400).json({
                 success: false,
-                message: 'عبارت جستجو الزامی است'
+                message: 'Search query must be at least 2 characters long'
             });
         }
 
         const cacheKey = `${CACHE_KEYS.SEARCH}:${query}:${page}:${limit}:${category}:${roastLevel}`;
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            logger.debug('Serving search results from cache', { cacheKey });
-            return res.json({
-                ...cached,
-                fromCache: true
-            });
-        }
+        const responseData = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const searchFilter: any = {
+                    isActive: true,
+                    inStock: true,
+                    $text: { $search: query as string }
+                };
 
-        const filter: any = {
-            isActive: true,
-            isFeatured: false,
-            inStock: true
-        };
+                // Additional filters
+                if (category) searchFilter.category = category;
+                if (roastLevel) searchFilter.roastLevel = roastLevel;
 
-        // جستجوی متن
-        filter.$text = { $search: query as string };
+                const products = await Product.find(searchFilter)
+                    .populate('createdBy', 'name email')
+                    .select('name price originalPrice images category roastLevel flavorProfile weight description')
+                    .sort({ score: { $meta: "textScore" } })
+                    .limit(Number(limit))
+                    .skip((Number(page) - 1) * Number(limit));
 
-        // فیلترهای اضافی
-        if (category) filter.category = category;
-        if (roastLevel) filter.roastLevel = roastLevel;
+                const total = await Product.countDocuments(searchFilter);
 
-        const products = await Product.find(filter)
-            .populate('createdBy', 'name')
-            .select('name price originalPrice images category roastLevel flavorProfile weight description')
-            .sort({ score: { $meta: "textScore" } })
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
+                // Get search suggestions
+                const suggestions = await getSearchSuggestions(query as string);
 
-        const total = await Product.countDocuments(filter);
-
-        // 🆕 پیشنهادات جستجو
-        const searchSuggestions = await getSearchSuggestions(query as string);
-
-        const responseData = {
-            success: true,
-            products,
-            searchInfo: {
-                query,
-                totalResults: total,
-                suggestions: searchSuggestions
+                return {
+                    success: true,
+                    products,
+                    searchInfo: {
+                        query,
+                        totalResults: total,
+                        suggestions
+                    },
+                    pagination: {
+                        total,
+                        page: Number(page),
+                        limit: Number(limit),
+                        totalPages: Math.ceil(total / Number(limit))
+                    }
+                };
             },
-            pagination: {
-                total,
-                page: Number(page),
-                limit: Number(limit),
-                totalPages: Math.ceil(total / Number(limit))
-            },
-            section: 'menu-search'
-        };
+            CACHE_TTL.SHORT
+        );
 
-        // ذخیره در کش
-        await cacheSet(cacheKey, responseData, CACHE_TTL.SHORT);
-
-        res.json({
-            ...responseData,
-            fromCache: false
-        });
+        res.json(responseData);
 
     } catch (error: any) {
-        LoggerService.errorLog('searchProducts', error);
+        LoggerService.errorLog('searchProducts', error, {
+            query: req.query.q,
+            userId: req.userId
+        });
+
         res.status(500).json({
             success: false,
-            message: 'خطا در جستجوی محصولات',
-            error: error.message
+            message: 'Search operation failed',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
 
-// 🆕 تابع کمکی برای محصولات پرطرفدار منو
-const getPopularProductsForMenu = async (limit: number = 6) => {
+export const getProductById = async (req: AuthRequest, res: Response) => {
+    try {
+        const { id } = req.params;
+        const cacheKey = `${CACHE_KEYS.PRODUCT_DETAIL}:${id}`;
+
+        const product = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const productData = await Product.findById(id)
+                    .populate('createdBy', 'name email')
+                    .select('-searchKeywords');
+
+                if (!productData) {
+                    throw new Error('Product not found');
+                }
+
+                return productData;
+            },
+            CACHE_TTL.LONG
+        );
+
+        res.json({
+            success: true,
+            product
+        });
+
+    } catch (error: any) {
+        LoggerService.errorLog('getProductById', error, {
+            productId: req.params.id,
+            userId: req.userId
+        });
+
+        if (error.message === 'Product not found') {
+            return res.status(404).json({
+                success: false,
+                message: 'Product not found'
+            });
+        }
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve product details',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+export const createProduct = async (req: AuthRequest, res: Response) => {
+    try {
+        const {
+            name,
+            description,
+            price,
+            originalPrice,
+            category,
+            roastLevel,
+            flavorProfile,
+            origin,
+            weight,
+            stockQuantity,
+            isFeatured = false
+        } = req.body;
+
+        // Process uploaded images
+        const images: string[] = [];
+        if (req.files && Array.isArray(req.files)) {
+            images.push(...req.files.map((file: Express.Multer.File) => getFileUrl(file.filename)));
+        }
+
+        // Validate required images
+        if (images.length === 0) {
+            // Clean up uploaded files if validation fails
+            if (req.files && Array.isArray(req.files)) {
+                for (const file of req.files) {
+                    await deleteFile(file.filename);
+                }
+            }
+
+            return res.status(400).json({
+                success: false,
+                message: 'At least one product image is required'
+            });
+        }
+
+        // Create new product
+        const product = new Product({
+            name,
+            description,
+            price: parseFloat(price),
+            originalPrice: originalPrice ? parseFloat(originalPrice) : undefined,
+            category,
+            roastLevel,
+            flavorProfile: Array.isArray(flavorProfile)
+                ? flavorProfile
+                : flavorProfile?.split(',').map((f: string) => f.trim()) || [],
+            origin,
+            weight: parseFloat(weight),
+            stockQuantity: parseInt(stockQuantity),
+            isFeatured: isFeatured === 'true' || isFeatured === true,
+            images,
+            createdBy: req.userId
+        });
+
+        await product.save();
+
+        // Clear relevant caches
+        await clearProductCache();
+
+        LoggerService.userLog(req.userId!, 'create_product', {
+            productId: product._id.toString(),
+            productName: product.name,
+            isFeatured: product.isFeatured
+        });
+
+        logger.info('Product created successfully', {
+            adminId: req.userId,
+            productId: product._id.toString(),
+            category: product.category
+        });
+
+        res.status(201).json({
+            success: true,
+            message: `Product "${product.name}" created successfully`,
+            product: {
+                id: product._id.toString(),
+                name: product.name,
+                category: product.category,
+                isFeatured: product.isFeatured,
+                images: product.images
+            }
+        });
+
+    } catch (error: any) {
+        // Clean up uploaded files on error
+        if (req.files && Array.isArray(req.files)) {
+            for (const file of req.files) {
+                try {
+                    await deleteFile(file.filename);
+                } catch (deleteError) {
+                    logger.error('Failed to delete file after product creation error', {
+                        filename: file.filename,
+                        error: deleteError
+                    });
+                }
+            }
+        }
+
+        LoggerService.errorLog('createProduct', error, {
+            adminId: req.userId,
+            productData: req.body
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to create product',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+export const updateProduct = async (req: AuthRequest, res: Response) => {
+    try {
+        const { id } = req.params;
+        const updateData = { ...req.body };
+
+        // Find existing product
+        const existingProduct = await Product.findById(id);
+        if (!existingProduct) {
+            return res.status(404).json({
+                success: false,
+                message: 'Product not found'
+            });
+        }
+
+        // Process new images
+        const newImages: string[] = [];
+        if (req.files && Array.isArray(req.files)) {
+            newImages.push(...req.files.map((file: Express.Multer.File) => getFileUrl(file.filename)));
+        }
+
+        // Update images array
+        if (newImages.length > 0) {
+            updateData.images = [...existingProduct.images, ...newImages];
+        }
+
+        // Process flavor profile
+        if (updateData.flavorProfile && typeof updateData.flavorProfile === 'string') {
+            updateData.flavorProfile = updateData.flavorProfile.split(',').map((f: string) => f.trim());
+        }
+
+        // Convert numeric fields
+        if (updateData.price) updateData.price = parseFloat(updateData.price);
+        if (updateData.originalPrice) updateData.originalPrice = parseFloat(updateData.originalPrice);
+        if (updateData.weight) updateData.weight = parseFloat(updateData.weight);
+        if (updateData.stockQuantity) updateData.stockQuantity = parseInt(updateData.stockQuantity);
+        if (updateData.isFeatured) updateData.isFeatured = updateData.isFeatured === 'true';
+
+        const updatedProduct = await Product.findByIdAndUpdate(
+            id,
+            updateData,
+            { new: true, runValidators: true }
+        ).populate('createdBy', 'name email');
+
+        // Clear product cache
+        await clearProductCache();
+
+        LoggerService.userLog(req.userId!, 'update_product', {
+            productId: id,
+            productName: updatedProduct?.name,
+            changes: Object.keys(updateData)
+        });
+
+        res.json({
+            success: true,
+            message: `Product "${updatedProduct?.name}" updated successfully`,
+            product: updatedProduct
+        });
+
+    } catch (error: any) {
+        LoggerService.errorLog('updateProduct', error, {
+            adminId: req.userId,
+            productId: req.params.id
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update product',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+export const deleteProduct = async (req: AuthRequest, res: Response) => {
+    try {
+        const { id } = req.params;
+
+        const product = await Product.findById(id);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: 'Product not found'
+            });
+        }
+
+        // Delete associated image files
+        for (const imageUrl of product.images) {
+            const filename = imageUrl.split('/').pop();
+            if (filename) {
+                try {
+                    await deleteFile(filename);
+                } catch (deleteError) {
+                    logger.warn('Failed to delete product image file', {
+                        filename,
+                        error: deleteError
+                    });
+                }
+            }
+        }
+
+        await Product.findByIdAndDelete(id);
+
+        // Clear product cache
+        await clearProductCache();
+
+        LoggerService.userLog(req.userId!, 'delete_product', {
+            productId: id,
+            productName: product.name
+        });
+
+        logger.info('Product deleted successfully', {
+            adminId: req.userId,
+            productId: id,
+            productName: product.name
+        });
+
+        res.json({
+            success: true,
+            message: `Product "${product.name}" deleted successfully`
+        });
+
+    } catch (error: any) {
+        LoggerService.errorLog('deleteProduct', error, {
+            adminId: req.userId,
+            productId: req.params.id
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to delete product',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+export const deleteProductImage = async (req: AuthRequest, res: Response) => {
+    try {
+        const { id, imageUrl } = req.params;
+
+        const product = await Product.findById(id);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: 'Product not found'
+            });
+        }
+
+        // Remove image from array
+        const updatedImages = product.images.filter(img => img !== imageUrl);
+
+        // Ensure at least one image remains
+        if (updatedImages.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Cannot delete the last image. Products must have at least one image.'
+            });
+        }
+
+        // Delete file from server
+        const filename = imageUrl.split('/').pop();
+        if (filename) {
+            await deleteFile(filename);
+        }
+
+        // Update product with new images array
+        product.images = updatedImages;
+        await product.save();
+
+        // Clear product cache
+        await clearProductCache();
+
+        LoggerService.userLog(req.userId!, 'delete_product_image', {
+            productId: id,
+            imageUrl
+        });
+
+        res.json({
+            success: true,
+            message: 'Image deleted successfully',
+            product
+        });
+
+    } catch (error: any) {
+        LoggerService.errorLog('deleteProductImage', error, {
+            adminId: req.userId,
+            productId: req.params.id
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to delete product image',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+export const getAdminProducts = async (req: AuthRequest, res: Response) => {
+    try {
+        const {
+            page = 1,
+            limit = 10,
+            isActive,
+            isFeatured,
+            category,
+            search
+        } = req.query;
+
+        const cacheKey = `admin_products:${page}:${limit}:${isActive}:${isFeatured}:${category}:${search}`;
+
+        const responseData = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const filter: any = {};
+
+                if (isActive !== undefined) filter.isActive = isActive === 'true';
+                if (isFeatured !== undefined) filter.isFeatured = isFeatured === 'true';
+                if (category) filter.category = category;
+
+                // Search functionality
+                if (search) {
+                    filter.$or = [
+                        { name: { $regex: search, $options: 'i' } },
+                        { description: { $regex: search, $options: 'i' } }
+                    ];
+                }
+
+                const products = await Product.find(filter)
+                    .populate('createdBy', 'name email')
+                    .sort({ createdAt: -1 })
+                    .limit(Number(limit))
+                    .skip((Number(page) - 1) * Number(limit));
+
+                const total = await Product.countDocuments(filter);
+
+                return {
+                    success: true,
+                    products,
+                    pagination: {
+                        total,
+                        page: Number(page),
+                        limit: Number(limit),
+                        totalPages: Math.ceil(total / Number(limit))
+                    },
+                    filters: {
+                        isActive,
+                        isFeatured,
+                        category,
+                        search
+                    }
+                };
+            },
+            CACHE_TTL.SHORT
+        );
+
+        res.json(responseData);
+
+    } catch (error: any) {
+        LoggerService.errorLog('getAdminProducts', error, {
+            adminId: req.userId,
+            query: req.query
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve admin products',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+// Helper functions
+const getPopularProductsForMenu = async (limit: number = 6): Promise<any[]> => {
     try {
         const cacheKey = `${CACHE_KEYS.POPULAR}:${limit}`;
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return cached;
-        }
+        return await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const popularProducts = await Product.find({
+                    isActive: true,
+                    isFeatured: false,
+                    inStock: true
+                })
+                    .populate('createdBy', 'name')
+                    .select('name price originalPrice images category roastLevel description')
+                    .sort({
+                        // You can implement popularity algorithm here
+                        // For now, using creation date and random factor
+                        createdAt: -1
+                    })
+                    .limit(limit);
 
-        const products = await Product.find({
-            isActive: true,
-            isFeatured: false,
-            inStock: true
-        })
-            .populate('createdBy', 'name')
-            .select('name price originalPrice images category roastLevel description')
-            .sort({
-                // می‌توانید الگوریتم پرطرفدار بودن را اینجا پیاده‌سازی کنید
-                // فعلاً بر اساس تاریخ ایجاد
-                createdAt: -1
-            })
-            .limit(limit);
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, products, CACHE_TTL.LONG);
-
-        return products;
+                return popularProducts;
+            },
+            CACHE_TTL.LONG
+        );
     } catch (error) {
-        logger.error('Error getting popular products:', error);
+        logger.error('Error retrieving popular products', { error });
         return [];
     }
 };
 
-// 🆕 تابع برای محصولات پرطرفدار (API جداگانه)
+const getSearchSuggestions = async (query: string): Promise<string[]> => {
+    try {
+        const cacheKey = `search_suggestions:${query}`;
+
+        return await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const suggestions = await Product.aggregate([
+                    {
+                        $match: {
+                            $text: { $search: query },
+                            isActive: true
+                        }
+                    },
+                    {
+                        $unwind: "$searchKeywords"
+                    },
+                    {
+                        $match: {
+                            "searchKeywords": { $regex: query, $options: 'i' }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: "$searchKeywords",
+                            count: { $sum: 1 }
+                        }
+                    },
+                    {
+                        $sort: { count: -1 }
+                    },
+                    {
+                        $limit: 5
+                    },
+                    {
+                        $project: {
+                            _id: 0,
+                            keyword: "$_id"
+                        }
+                    }
+                ]);
+
+                return suggestions.map(s => s.keyword);
+            },
+            CACHE_TTL.MEDIUM
+        );
+    } catch (error) {
+        logger.error('Error getting search suggestions', { error, query });
+        return [];
+    }
+};
+
 export const getPopularProducts = async (req: AuthRequest, res: Response) => {
     try {
         const { limit = 6 } = req.query;
@@ -325,543 +769,7 @@ export const getPopularProducts = async (req: AuthRequest, res: Response) => {
         LoggerService.errorLog('getPopularProducts', error);
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت محصولات پرطرفدار',
-            error: error.message
+            message: 'Failed to retrieve popular products'
         });
-    }
-};
-
-// ایجاد محصول جدید
-export const createProduct = async (req: AuthRequest, res: Response) => {
-    try {
-        const {
-            name,
-            description,
-            price,
-            originalPrice,
-            category,
-            roastLevel,
-            flavorProfile,
-            origin,
-            weight,
-            stockQuantity,
-            isFeatured = 'false'
-        } = req.body;
-
-        // بررسی فایل‌های آپلود شده
-        const images: string[] = [];
-        if (req.files && Array.isArray(req.files)) {
-            images.push(...req.files.map((file: Express.Multer.File) => getFileUrl(file.filename)));
-        }
-
-        // ایجاد محصول
-        const product = new Product({
-            name,
-            description,
-            price: parseFloat(price),
-            originalPrice: originalPrice ? parseFloat(originalPrice) : undefined,
-            category,
-            roastLevel,
-            flavorProfile: Array.isArray(flavorProfile) ? flavorProfile : flavorProfile?.split(',').map((f: string) => f.trim()) || [],
-            origin,
-            weight: parseFloat(weight),
-            stockQuantity: parseInt(stockQuantity),
-            isFeatured: isFeatured === 'true',
-            images,
-            createdBy: req.userId
-        });
-
-        await product.save();
-
-        // 🔥 حذف کش مرتبط
-        await invalidateProductCache();
-
-        const destination = product.isFeatured ? 'پیشنهادات ویژه' : 'منو';
-
-        LoggerService.userLog(req.userId!, 'create_product', {
-            productId: product._id.toString(),
-            productName: product.name,
-            destination: destination
-        });
-
-        logger.info('Product created successfully', {
-            adminId: req.userId,
-            productId: product._id.toString(),
-            isFeatured: product.isFeatured
-        });
-
-        res.status(201).json({
-            success: true,
-            message: `محصول با موفقیت ایجاد شد و به ${destination} اضافه گردید`,
-            product: {
-                id: product._id.toString(),
-                name: product.name,
-                isFeatured: product.isFeatured,
-                destination: destination,
-                images: product.images
-            }
-        });
-
-    } catch (error: any) {
-        // حذف فایل‌های آپلود شده در صورت خطا
-        if (req.files && Array.isArray(req.files)) {
-            for (const file of req.files) {
-                try {
-                    await deleteFile(file.filename);
-                } catch (deleteError) {
-                    logger.error('Failed to delete file after error:', {
-                        filename: file.filename,
-                        error: deleteError
-                    });
-                }
-            }
-        }
-
-        LoggerService.errorLog('createProduct', error, {
-            adminId: req.userId,
-            productData: req.body
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'خطا در ایجاد محصول',
-            error: error.message
-        });
-    }
-};
-
-// به‌روزرسانی محصول
-export const updateProduct = async (req: AuthRequest, res: Response) => {
-    try {
-        const { id } = req.params;
-        const updateData = { ...req.body };
-
-        // پیدا کردن محصول
-        const product = await Product.findById(id);
-        if (!product) {
-            return res.status(404).json({
-                success: false,
-                message: 'محصول یافت نشد'
-            });
-        }
-
-        // پردازش فایل‌های جدید
-        const newImages: string[] = [];
-        if (req.files && Array.isArray(req.files)) {
-            newImages.push(...req.files.map((file: Express.Multer.File) => getFileUrl(file.filename)));
-        }
-
-        // اگر فایل جدید آپلود شده، عکس‌های جدید را اضافه کن
-        if (newImages.length > 0) {
-            updateData.images = [...product.images, ...newImages];
-        }
-
-        // پردازش flavorProfile
-        if (updateData.flavorProfile && typeof updateData.flavorProfile === 'string') {
-            updateData.flavorProfile = updateData.flavorProfile.split(',').map((f: string) => f.trim());
-        }
-
-        // تبدیل اعداد
-        if (updateData.price) updateData.price = parseFloat(updateData.price);
-        if (updateData.originalPrice) updateData.originalPrice = parseFloat(updateData.originalPrice);
-        if (updateData.weight) updateData.weight = parseFloat(updateData.weight);
-        if (updateData.stockQuantity) updateData.stockQuantity = parseInt(updateData.stockQuantity);
-        if (updateData.isFeatured) updateData.isFeatured = updateData.isFeatured === 'true';
-
-        const updatedProduct = await Product.findByIdAndUpdate(
-            id,
-            updateData,
-            { new: true, runValidators: true }
-        ).populate('createdBy', 'name email');
-
-        // 🔥 حذف کش مرتبط
-        await invalidateProductCache();
-
-        const destination = updatedProduct?.isFeatured ? 'پیشنهادات ویژه' : 'منو';
-
-        LoggerService.userLog(req.userId!, 'update_product', {
-            productId: id,
-            productName: updatedProduct?.name,
-            newDestination: destination
-        });
-
-        res.json({
-            success: true,
-            message: `محصول با موفقیت به‌روزرسانی شد و به ${destination} منتقل گردید`,
-            product: updatedProduct
-        });
-
-    } catch (error: any) {
-        LoggerService.errorLog('updateProduct', error, {
-            adminId: req.userId,
-            productId: req.params.id
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'خطا در به‌روزرسانی محصول',
-            error: error.message
-        });
-    }
-};
-
-// حذف محصول
-export const deleteProduct = async (req: AuthRequest, res: Response) => {
-    try {
-        const { id } = req.params;
-
-        const product = await Product.findById(id);
-        if (!product) {
-            return res.status(404).json({
-                success: false,
-                message: 'محصول یافت نشد'
-            });
-        }
-
-        // حذف فایل‌های عکس
-        for (const imageUrl of product.images) {
-            const filename = imageUrl.split('/').pop();
-            if (filename) {
-                try {
-                    await deleteFile(filename);
-                } catch (deleteError) {
-                    logger.warn('Failed to delete product image:', {
-                        filename,
-                        error: deleteError
-                    });
-                }
-            }
-        }
-
-        await Product.findByIdAndDelete(id);
-
-        // 🔥 حذف کش مرتبط
-        await invalidateProductCache();
-
-        LoggerService.userLog(req.userId!, 'delete_product', {
-            productId: id,
-            productName: product.name
-        });
-
-        logger.info('Product deleted successfully', {
-            adminId: req.userId,
-            productId: id
-        });
-
-        res.json({
-            success: true,
-            message: 'محصول با موفقیت حذف شد'
-        });
-
-    } catch (error: any) {
-        LoggerService.errorLog('deleteProduct', error, {
-            adminId: req.userId,
-            productId: req.params.id
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'خطا در حذف محصول',
-            error: error.message
-        });
-    }
-};
-
-// دریافت تمام محصولات (برای ادمین)
-export const getAdminProducts = async (req: AuthRequest, res: Response) => {
-    try {
-        const {
-            page = 1,
-            limit = 10,
-            isActive,
-            isFeatured
-        } = req.query;
-
-        const filter: any = {};
-
-        if (isActive !== undefined) {
-            filter.isActive = isActive === 'true';
-        }
-
-        if (isFeatured !== undefined) {
-            filter.isFeatured = isFeatured === 'true';
-        }
-
-        const products = await Product.find(filter)
-            .populate('createdBy', 'name email')
-            .sort({ createdAt: -1 })
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
-
-        const total = await Product.countDocuments(filter);
-
-        res.json({
-            success: true,
-            products,
-            pagination: {
-                total,
-                page: Number(page),
-                limit: Number(limit),
-                totalPages: Math.ceil(total / Number(limit))
-            }
-        });
-
-    } catch (error: any) {
-        LoggerService.errorLog('getAdminProducts', error, {
-            adminId: req.userId
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'خطا در دریافت محصولات',
-            error: error.message
-        });
-    }
-};
-
-// دریافت محصول بر اساس ID
-export const getProductById = async (req: AuthRequest, res: Response) => {
-    try {
-        const { id } = req.params;
-        const cacheKey = `${CACHE_KEYS.PRODUCT_DETAIL}:${id}`;
-
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return res.json({
-                success: true,
-                product: cached,
-                fromCache: true
-            });
-        }
-
-        const product = await Product.findById(id)
-            .populate('createdBy', 'name');
-
-        if (!product) {
-            return res.status(404).json({
-                success: false,
-                message: 'محصول یافت نشد'
-            });
-        }
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, product, CACHE_TTL.LONG);
-
-        res.json({
-            success: true,
-            product,
-            fromCache: false
-        });
-
-    } catch (error: any) {
-        LoggerService.errorLog('getProductById', error, {
-            productId: req.params.id
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'خطا در دریافت محصول',
-            error: error.message
-        });
-    }
-};
-
-// حذف عکس محصول
-export const deleteProductImage = async (req: AuthRequest, res: Response) => {
-    try {
-        const { id, imageUrl } = req.params;
-
-        const product = await Product.findById(id);
-        if (!product) {
-            return res.status(404).json({
-                success: false,
-                message: 'محصول یافت نشد'
-            });
-        }
-
-        // حذف عکس از آرایه
-        const updatedImages = product.images.filter(img => img !== imageUrl);
-
-        // حذف فایل از سرور
-        const filename = imageUrl.split('/').pop();
-        if (filename) {
-            await deleteFile(filename);
-        }
-
-        product.images = updatedImages;
-        await product.save();
-
-        // 🔥 حذف کش مرتبط
-        await invalidateProductCache();
-
-        LoggerService.userLog(req.userId!, 'delete_product_image', {
-            productId: id,
-            imageUrl
-        });
-
-        res.json({
-            success: true,
-            message: 'عکس با موفقیت حذف شد',
-            product
-        });
-
-    } catch (error: any) {
-        LoggerService.errorLog('deleteProductImage', error, {
-            adminId: req.userId,
-            productId: req.params.id
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'خطا در حذف عکس',
-            error: error.message
-        });
-    }
-};
-
-// دریافت تمام محصولات با فیلتر (برای موارد عمومی)
-export const getProducts = async (req: AuthRequest, res: Response) => {
-    try {
-        const {
-            page = 1,
-            limit = 10,
-            category,
-            roastLevel,
-            minPrice,
-            maxPrice,
-            inStock,
-            isFeatured,
-            search
-        } = req.query;
-
-        const cacheKey = `products:${page}:${limit}:${category}:${roastLevel}:${minPrice}:${maxPrice}:${inStock}:${isFeatured}:${search}`;
-
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return res.json({
-                ...cached,
-                fromCache: true
-            });
-        }
-
-        const filter: any = { isActive: true };
-
-        if (category) filter.category = category;
-        if (roastLevel) filter.roastLevel = roastLevel;
-        if (inStock !== undefined) filter.inStock = inStock === 'true';
-        if (isFeatured !== undefined) filter.isFeatured = isFeatured === 'true';
-
-        // فیلتر قیمت
-        if (minPrice || maxPrice) {
-            filter.price = {};
-            if (minPrice) filter.price.$gte = parseFloat(minPrice as string);
-            if (maxPrice) filter.price.$lte = parseFloat(maxPrice as string);
-        }
-
-        // جستجو
-        if (search) {
-            filter.$text = { $search: search as string };
-        }
-
-        const sort: any = { createdAt: -1 };
-        if (search) {
-            sort.score = { $meta: "textScore" };
-        }
-
-        const products = await Product.find(filter)
-            .populate('createdBy', 'name')
-            .sort(sort)
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
-
-        const total = await Product.countDocuments(filter);
-
-        const responseData = {
-            success: true,
-            products,
-            pagination: {
-                total,
-                page: Number(page),
-                limit: Number(limit),
-                totalPages: Math.ceil(total / Number(limit))
-            }
-        };
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, responseData, CACHE_TTL.MEDIUM);
-
-        res.json({
-            ...responseData,
-            fromCache: false
-        });
-
-    } catch (error: any) {
-        LoggerService.errorLog('getProducts', error);
-        res.status(500).json({
-            success: false,
-            message: 'خطا در دریافت محصولات',
-            error: error.message
-        });
-    }
-};
-
-// 🆕 تابع کمکی برای پیشنهادات جستجو
-const getSearchSuggestions = async (query: string): Promise<string[]> => {
-    try {
-        const cacheKey = `search_suggestions:${query}`;
-
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return cached;
-        }
-
-        const suggestions = await Product.aggregate([
-            {
-                $match: {
-                    $text: { $search: query },
-                    isActive: true,
-                    isFeatured: false
-                }
-            },
-            {
-                $unwind: "$searchKeywords"
-            },
-            {
-                $match: {
-                    "searchKeywords": { $regex: query, $options: 'i' }
-                }
-            },
-            {
-                $group: {
-                    _id: "$searchKeywords",
-                    count: { $sum: 1 }
-                }
-            },
-            {
-                $sort: { count: -1 }
-            },
-            {
-                $limit: 5
-            },
-            {
-                $project: {
-                    _id: 0,
-                    keyword: "$_id"
-                }
-            }
-        ]);
-
-        const result = suggestions.map(s => s.keyword);
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, result, CACHE_TTL.LONG);
-
-        return result;
-    } catch (error) {
-        logger.error('Error getting search suggestions:', error);
-        return [];
     }
 };

@@ -1,4 +1,4 @@
-// backend/src/controllers/googlePasswordController.ts
+// backend/src/controllers/googlePasswordController.ts - Complete implementation
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import User from '../../models/users';
@@ -6,6 +6,12 @@ import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import {
+    cacheGet,
+    cacheDelete,
+    clearUserCache,
+    generateKey
+} from '../../utils/cacheUtils';
 
 export const setupGooglePassword = async (req: Request, res: Response) => {
     try {
@@ -15,7 +21,7 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             logger.warn('Google password setup - missing tempToken or password');
             return res.status(400).json({
                 success: false,
-                message: 'Temp token and password are required'
+                message: 'Temporary token and password are required'
             });
         }
 
@@ -27,12 +33,12 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             });
         }
 
-        // بررسی توکن موقت
+        // Verify temporary token
         let decoded: any;
         try {
             decoded = jwt.verify(tempToken, process.env.JWT_SECRET!);
         } catch (error) {
-            logger.warn('Google password setup - invalid or expired temp token');
+            logger.warn('Google password setup - invalid or expired temporary token');
             return res.status(401).json({
                 success: false,
                 message: 'Invalid or expired temporary token'
@@ -50,11 +56,11 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
         let user;
         let isNewUser = false;
 
-        // اگر کاربر جدید است (دارای اطلاعات گوگل)
+        // Handle new user registration (from Google OAuth)
         if (decoded.googleUser) {
             const { googleUser } = decoded;
 
-            // بررسی اینکه کاربر از قبل وجود ندارد (برای جلوگیری از duplicate)
+            // Check for existing user to prevent duplicates
             const existingUser = await User.findOne({
                 email: googleUser.email
             });
@@ -63,17 +69,17 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
                 logger.warn('Google password setup - user already exists', { email: googleUser.email });
                 return res.status(400).json({
                     success: false,
-                    message: 'User already exists'
+                    message: 'User with this email already exists'
                 });
             }
 
-            // هش کردن رمز عبور
+            // Hash password with pepper
             const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
                 .update(password)
                 .digest('hex');
             const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-            // ایجاد کاربر جدید
+            // Create new user account
             user = new User({
                 googleId: googleUser.googleId,
                 email: googleUser.email,
@@ -88,18 +94,21 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             await user.save();
             isNewUser = true;
 
+            // Clear temporary cache
+            await cacheDelete(`temp_tokens:google:${googleUser.googleId}`);
+
             LoggerService.authLog(user._id.toString(), 'google_registration_completed', {
                 provider: 'google',
                 email: user.email
             });
 
-            logger.info('New Google user registration completed', {
+            logger.info('New Google user registration completed with password setup', {
                 userId: user._id.toString(),
                 email: user.email
             });
 
         }
-        // اگر کاربر موجود است (به روزرسانی رمز عبور)
+        // Handle existing user adding password
         else if (decoded.userId) {
             user = await User.findById(decoded.userId);
 
@@ -111,16 +120,19 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
                 });
             }
 
-            // هش کردن رمز عبور جدید
+            // Hash new password with pepper
             const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
                 .update(password)
                 .digest('hex');
             const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-            // به روزرسانی رمز عبور
+            // Update user password
             user.password = hashedPassword;
             user.lastLogin = new Date();
             await user.save();
+
+            // Clear temporary cache
+            await cacheDelete(`temp_tokens:password_setup:${user._id.toString()}`);
 
             LoggerService.authLog(user._id.toString(), 'google_password_setup', {
                 provider: 'google',
@@ -139,12 +151,15 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             });
         }
 
-        // تولید توکن اصلی
+        // Generate main authentication token
         const token = jwt.sign(
             { userId: user._id.toString() },
             process.env.JWT_SECRET!,
             { expiresIn: '120d' }
         );
+
+        // Clear user cache to reflect changes
+        await clearUserCache(user._id.toString());
 
         logger.info('Google password setup completed successfully', {
             userId: user._id.toString(),

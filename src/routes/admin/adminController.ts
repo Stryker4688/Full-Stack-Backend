@@ -1,4 +1,4 @@
-// backend/src/controllers/adminController.ts - بهینه‌سازی شده با Redis
+// backend/src/controllers/adminController.ts - Optimized with cache utilities
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import User from '../../models/users';
@@ -6,94 +6,57 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
-import { clearUserCache } from '../../utils/cacheUtils';
-import { redisClient } from '../../config/redis';
+import {
+    cacheGet,
+    cacheSet,
+    cacheDelete,
+    clearUserCache,
+    clearAdminCache,
+    generateKey,
+    CACHE_TTL,
+    cacheWithFallback
+} from '../../utils/cacheUtils';
 
-// کلیدهای کش
-const CACHE_KEYS = {
-    ADMINS_LIST: 'admins_list',
-    ADMIN_DETAIL: 'admin_detail',
-    SUPER_ADMINS: 'super_admins'
-};
-
-// زمان انقضای کش (ثانیه)
-const CACHE_TTL = {
-    SHORT: 300,    // 5 دقیقه
-    MEDIUM: 1800,  // 30 دقیقه
-    LONG: 3600     // 1 ساعت
-};
-
-// توابع کمکی کش
-const cacheGet = async (key: string): Promise<any> => {
-    try {
-        const cached = await redisClient.get(key);
-        return cached ? JSON.parse(cached) : null;
-    } catch (error) {
-        logger.error('Cache get error', { key, error });
-        return null;
-    }
-};
-
-const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
-    try {
-        await redisClient.setEx(key, ttl, JSON.stringify(data));
-    } catch (error) {
-        logger.error('Cache set error', { key, error });
-    }
-};
-
-const invalidateAdminCache = async (): Promise<void> => {
-    try {
-        const listKeys = await redisClient.keys(`${CACHE_KEYS.ADMINS_LIST}:*`);
-        const detailKeys = await redisClient.keys(`${CACHE_KEYS.ADMIN_DETAIL}:*`);
-        const superAdminKeys = await redisClient.keys(`${CACHE_KEYS.SUPER_ADMINS}:*`);
-
-        const allKeys = [...listKeys, ...detailKeys, ...superAdminKeys];
-
-        if (allKeys.length > 0) {
-            await redisClient.del(allKeys);
-            logger.debug('Admin cache invalidated', { keysCount: allKeys.length });
-        }
-    } catch (error) {
-        logger.error('Admin cache invalidation error', { error });
-    }
-};
-
+// Create new admin (super admin only)
 export const createAdmin = async (req: AuthRequest, res: Response) => {
     try {
         const { name, email, password } = req.body;
 
-        logger.info('Creating new admin', {
+        logger.info('Creating new admin account', {
             superAdminId: req.userId,
             adminEmail: email
         });
 
-        // بررسی کش برای کاربر موجود
-        const userCacheKey = `${CACHE_KEYS.ADMIN_DETAIL}:${email}`;
+        // Check cache for existing user
+        const userCacheKey = generateKey.userProfile(email);
         const existingUserCached = await cacheGet(userCacheKey);
 
         if (existingUserCached) {
-            res.status(400).json({ message: 'کاربر با این ایمیل وجود دارد' });
-            return;
+            return res.status(400).json({
+                success: false,
+                message: 'User with this email already exists'
+            });
         }
 
-        // بررسی وجود کاربر در دیتابیس
+        // Check database for existing user
         const existingUser = await User.findOne({ email });
         if (existingUser) {
-            // ذخیره در کش
+            // Cache existence to prevent duplicate checks
             await cacheSet(userCacheKey, { exists: true }, CACHE_TTL.SHORT);
 
-            res.status(400).json({ message: 'کاربر با این ایمیل وجود دارد' });
-            return;
+            return res.status(400).json({
+                success: false,
+                message: 'User with this email already exists'
+            });
         }
 
-        // هش کردن رمز عبور
+        // Hash password with pepper
         const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
             .update(password)
             .digest('hex');
         const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-        // ایجاد ادمین
+        // Create admin user
         const admin = new User({
             name,
             email,
@@ -104,11 +67,11 @@ export const createAdmin = async (req: AuthRequest, res: Response) => {
 
         await admin.save();
 
-        // 🔥 حذف کش مرتبط
-        await invalidateAdminCache();
+        // Clear admin cache to reflect new admin
+        await clearAdminCache();
 
-        // 🔥 ذخیره ادمین جدید در کش
-        await cacheSet(`${CACHE_KEYS.ADMIN_DETAIL}:${admin._id.toString()}`, {
+        // Cache new admin information
+        await cacheSet(generateKey.userDetail(admin._id.toString()), {
             id: admin._id.toString(),
             name: admin.name,
             email: admin.email,
@@ -127,7 +90,8 @@ export const createAdmin = async (req: AuthRequest, res: Response) => {
         });
 
         res.status(201).json({
-            message: 'ادمین با موفقیت ایجاد شد',
+            success: true,
+            message: 'Admin account created successfully',
             admin: {
                 id: admin._id.toString(),
                 name: admin.name,
@@ -143,74 +107,79 @@ export const createAdmin = async (req: AuthRequest, res: Response) => {
             superAdminId: req.userId,
             adminData: req.body
         });
-        res.status(500).json({ message: 'خطا در ایجاد ادمین', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error creating admin account',
+            error
+        });
     }
 };
 
+// Get all admins with pagination
 export const getAdmins = async (req: AuthRequest, res: Response) => {
     try {
         const { page = 1, limit = 10 } = req.query;
-        const cacheKey = `${CACHE_KEYS.ADMINS_LIST}:${page}:${limit}`;
+        const cacheKey = generateKey.adminList(Number(page), Number(limit));
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            logger.debug('Serving admins list from cache', { cacheKey });
-            return res.json({
-                ...cached,
-                fromCache: true
-            });
-        }
+        const result = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                // Get only admin accounts (not super_admins)
+                const admins = await User.find({
+                    role: 'admin'
+                })
+                    .select('-password')
+                    .sort({ createdAt: -1 })
+                    .limit(Number(limit))
+                    .skip((Number(page) - 1) * Number(limit));
 
-        // فقط ادمین‌ها را برگردان (نه سوپر ادمین‌ها)
-        const admins = await User.find({
-            role: 'admin'
-        })
-            .select('-password')
-            .sort({ createdAt: -1 })
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
+                const total = await User.countDocuments({
+                    role: 'admin'
+                });
 
-        const total = await User.countDocuments({
-            role: 'admin'
-        });
+                return {
+                    admins,
+                    totalPages: Math.ceil(total / Number(limit)),
+                    currentPage: Number(page),
+                    total
+                };
+            },
+            CACHE_TTL.SHORT
+        );
 
-        const result = {
-            admins,
-            totalPages: Math.ceil(total / Number(limit)),
-            currentPage: Number(page),
-            total
-        };
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, result, CACHE_TTL.SHORT);
-
-        logger.debug('Admins list fetched', {
+        logger.debug('Admins list retrieved', {
             superAdminId: req.userId,
-            count: admins.length
+            count: result.admins.length
         });
 
         res.json({
-            ...result,
-            fromCache: false
+            success: true,
+            ...result
         });
 
     } catch (error) {
         LoggerService.errorLog('getAdmins', error, {
             superAdminId: req.userId
         });
-        res.status(500).json({ message: 'خطا در دریافت لیست ادمین‌ها', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error retrieving admins list',
+            error
+        });
     }
 };
 
+// Delete admin account
 export const deleteAdmin = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
 
-        // جلوگیری از حذف خود سوپر ادمین
+        // Prevent self-deletion
         if (id === req.userId) {
-            res.status(400).json({ message: 'نمی‌توانید خودتان را حذف کنید' });
-            return;
+            return res.status(400).json({
+                success: false,
+                message: 'You cannot delete your own account'
+            });
         }
 
         const admin = await User.findOneAndDelete({
@@ -219,16 +188,18 @@ export const deleteAdmin = async (req: AuthRequest, res: Response) => {
         });
 
         if (!admin) {
-            res.status(404).json({ message: 'ادمین یافت نشد' });
-            return;
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
         }
 
-        // 🔥 حذف کش‌های مرتبط
+        // Clear all relevant caches
         await Promise.all([
             clearUserCache(id),
-            invalidateAdminCache(),
-            redisClient.del(`${CACHE_KEYS.ADMIN_DETAIL}:${id}`),
-            redisClient.del(`${CACHE_KEYS.ADMIN_DETAIL}:${admin.email}`)
+            clearAdminCache(),
+            cacheDelete(generateKey.userDetail(id)),
+            cacheDelete(generateKey.userProfile(admin.email))
         ]);
 
         LoggerService.userLog(req.userId!, 'delete_admin', {
@@ -241,17 +212,25 @@ export const deleteAdmin = async (req: AuthRequest, res: Response) => {
             adminId: id
         });
 
-        res.json({ message: 'ادمین با موفقیت حذف شد' });
+        res.json({
+            success: true,
+            message: 'Admin account deleted successfully'
+        });
 
     } catch (error) {
         LoggerService.errorLog('deleteAdmin', error, {
             superAdminId: req.userId,
             adminId: req.params.id
         });
-        res.status(500).json({ message: 'خطا در حذف ادمین', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error deleting admin account',
+            error
+        });
     }
 };
 
+// Toggle admin status (activate/deactivate)
 export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -262,15 +241,17 @@ export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
         });
 
         if (!admin) {
-            res.status(404).json({ message: 'ادمین یافت نشد' });
-            return;
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
         }
 
         admin.isActive = !admin.isActive;
         await admin.save();
 
-        // 🔥 آپدیت کش
-        await cacheSet(`${CACHE_KEYS.ADMIN_DETAIL}:${id}`, {
+        // Update admin cache
+        await cacheSet(generateKey.userDetail(id), {
             id: admin._id.toString(),
             name: admin.name,
             email: admin.email,
@@ -278,22 +259,23 @@ export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
             isActive: admin.isActive
         }, CACHE_TTL.MEDIUM);
 
-        // 🔥 حذف کش لیست‌ها
-        await invalidateAdminCache();
+        // Clear admin list cache
+        await clearAdminCache();
 
         LoggerService.userLog(req.userId!, 'toggle_admin_status', {
             adminId: id,
             newStatus: admin.isActive ? 'active' : 'inactive'
         });
 
-        logger.info('Admin status toggled', {
+        logger.info('Admin status updated', {
             superAdminId: req.userId,
             adminId: id,
             isActive: admin.isActive
         });
 
         res.json({
-            message: `ادمین ${admin.isActive ? 'فعال' : 'غیرفعال'} شد`,
+            success: true,
+            message: `Admin account ${admin.isActive ? 'activated' : 'deactivated'} successfully`,
             admin: {
                 id: admin._id.toString(),
                 name: admin.name,
@@ -307,36 +289,34 @@ export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
             superAdminId: req.userId,
             adminId: req.params.id
         });
-        res.status(500).json({ message: 'خطا در تغییر وضعیت ادمین', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error updating admin status',
+            error
+        });
     }
 };
 
-// 🆕 تابع برای دریافت سوپر ادمین‌ها از کش
+// Get super admins list
 export const getSuperAdmins = async (req: AuthRequest, res: Response) => {
     try {
-        const cacheKey = CACHE_KEYS.SUPER_ADMINS;
+        const cacheKey = 'super_admins_list';
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return res.json({
-                success: true,
-                superAdmins: cached,
-                fromCache: true
-            });
-        }
+        const superAdmins = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const superAdmins = await User.find({ role: 'super_admin' })
+                    .select('name email isActive createdAt lastLogin')
+                    .sort({ createdAt: -1 });
 
-        const superAdmins = await User.find({ role: 'super_admin' })
-            .select('name email isActive createdAt lastLogin')
-            .sort({ createdAt: -1 });
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, superAdmins, CACHE_TTL.LONG);
+                return superAdmins;
+            },
+            CACHE_TTL.LONG
+        );
 
         res.json({
             success: true,
-            superAdmins,
-            fromCache: false
+            superAdmins
         });
 
     } catch (error) {
@@ -345,54 +325,46 @@ export const getSuperAdmins = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت سوپر ادمین‌ها'
+            message: 'Error retrieving super admins list'
         });
     }
 };
 
-// 🆕 تابع برای دریافت آمار ادمین‌ها
+// Get admin statistics
 export const getAdminStats = async (req: AuthRequest, res: Response) => {
     try {
-        const cacheKey = `${CACHE_KEYS.ADMINS_LIST}:stats`;
+        const cacheKey = 'admin_stats';
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return res.json({
-                success: true,
-                stats: cached,
-                fromCache: true
-            });
-        }
+        const stats = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const totalAdmins = await User.countDocuments({ role: 'admin' });
+                const activeAdmins = await User.countDocuments({ role: 'admin', isActive: true });
+                const totalSuperAdmins = await User.countDocuments({ role: 'super_admin' });
 
-        const totalAdmins = await User.countDocuments({ role: 'admin' });
-        const activeAdmins = await User.countDocuments({ role: 'admin', isActive: true });
-        const totalSuperAdmins = await User.countDocuments({ role: 'super_admin' });
+                // New admins in last 30 days
+                const thirtyDaysAgo = new Date();
+                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-        // آمار ادمین‌های جدید در 30 روز گذشته
-        const thirtyDaysAgo = new Date();
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                const newAdmins = await User.countDocuments({
+                    role: 'admin',
+                    createdAt: { $gte: thirtyDaysAgo }
+                });
 
-        const newAdmins = await User.countDocuments({
-            role: 'admin',
-            createdAt: { $gte: thirtyDaysAgo }
-        });
-
-        const stats = {
-            totalAdmins,
-            activeAdmins,
-            inactiveAdmins: totalAdmins - activeAdmins,
-            totalSuperAdmins,
-            newAdminsLast30Days: newAdmins
-        };
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, stats, CACHE_TTL.SHORT);
+                return {
+                    totalAdmins,
+                    activeAdmins,
+                    inactiveAdmins: totalAdmins - activeAdmins,
+                    totalSuperAdmins,
+                    newAdminsLast30Days: newAdmins
+                };
+            },
+            CACHE_TTL.SHORT
+        );
 
         res.json({
             success: true,
-            stats,
-            fromCache: false
+            stats
         });
 
     } catch (error) {
@@ -401,7 +373,7 @@ export const getAdminStats = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت آمار ادمین‌ها'
+            message: 'Error retrieving admin statistics'
         });
     }
 };

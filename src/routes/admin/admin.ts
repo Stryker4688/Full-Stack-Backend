@@ -11,11 +11,11 @@ import {
 
 const router = express.Router();
 
-// فقط سوپر ادمین می‌تواند ادمین ایجاد/حذف کند
+// Only super admin can create/delete admins
 router.use(authenticateToken);
 router.use(requireSuperAdmin);
 
-// مدیریت ادمین‌ها
+// Admin management
 router.post('/admins', createAdmin);
 router.get('/admins', getAdmins);
 router.delete('/admins/:id', deleteAdmin);

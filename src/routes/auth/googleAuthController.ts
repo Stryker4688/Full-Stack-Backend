@@ -1,201 +1,312 @@
-// backend/src/controllers/googleAuthController.ts - بهینه‌سازی شده با Redis
+// backend/src/controllers/googleAuthController.ts - Enhanced with comprehensive features
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import User from '../../models/users';
 import { GoogleAuthService } from '../../services/googleAuthService';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
-import bcrypt from 'bcryptjs';
-import crypto from 'crypto';
 import { AuthRequest } from '../../middlewares/auth';
+import {
+    cacheGet,
+    cacheSet,
+    cacheDelete,
+    checkRateLimit,
+    generateKey,
+    CACHE_TTL,
+    cacheWithFallback
+} from '../../utils/cacheUtils';
 import { redisClient } from '../../config/redis';
 
-// کلیدهای کش
-const CACHE_KEYS = {
-    GOOGLE_USER: 'google_user',
-    GOOGLE_TOKENS: 'google_tokens',
-    AUTH_SESSIONS: 'auth_sessions',
-    TEMP_TOKENS: 'temp_tokens',
-    GOOGLE_RATE_LIMIT: 'google_rate_limit'
-};
-
-// زمان انقضای کش (ثانیه)
-const CACHE_TTL = {
-    SHORT: 300,      // 5 دقیقه
-    MEDIUM: 1800,    // 30 دقیقه
-    LONG: 3600,      // 1 ساعت
-    VERY_LONG: 86400 // 24 ساعت
-};
-
-// توابع کمکی کش
-const cacheGet = async (key: string): Promise<any> => {
-    try {
-        const cached = await redisClient.get(key);
-        return cached ? JSON.parse(cached) : null;
-    } catch (error) {
-        logger.error('Cache get error', { key, error });
-        return null;
-    }
-};
-
-const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
-    try {
-        await redisClient.setEx(key, ttl, JSON.stringify(data));
-    } catch (error) {
-        logger.error('Cache set error', { key, error });
-    }
-};
-
-const cacheDelete = async (key: string): Promise<void> => {
-    try {
-        await redisClient.del(key);
-    } catch (error) {
-        logger.error('Cache delete error', { key, error });
-    }
-};
-
-// تابع برای مدیریت rate limiting
-const checkRateLimit = async (identifier: string, maxAttempts: number = 10, windowMs: number = 300): Promise<{ allowed: boolean; remaining: number }> => {
-    const rateLimitKey = `${CACHE_KEYS.GOOGLE_RATE_LIMIT}:${identifier}`;
-
-    try {
-        const current = await redisClient.incr(rateLimitKey);
-
-        if (current === 1) {
-            await redisClient.expire(rateLimitKey, windowMs);
-        }
-
-        const remaining = Math.max(0, maxAttempts - current);
-        const allowed = current <= maxAttempts;
-
-        return { allowed, remaining };
-    } catch (error) {
-        logger.error('Rate limit check error', { identifier, error });
-        return { allowed: true, remaining: maxAttempts }; // Fail open
-    }
-};
-
+// Enhanced Google authentication with comprehensive error handling
 export const googleAuth = async (req: AuthRequest, res: Response) => {
     try {
         const { code, idToken, rememberMe = false } = req.body;
         const ip = req.ip || 'unknown';
 
-        logger.debug('Google auth attempt', {
+        logger.debug('Google authentication request received', {
             hasCode: !!code,
             hasToken: !!idToken,
-            ip
+            ip,
+            userAgent: req.get('User-Agent')
         });
 
-        // 🔥 بررسی rate limiting
-        const rateLimitCheck = await checkRateLimit(ip, 15, 300); // 15 درخواست در 5 دقیقه
+        // Enhanced rate limiting with IP and user agent fingerprinting
+        const userFingerprint = `${ip}-${req.get('User-Agent')?.substring(0, 50)}`;
+        const rateLimitCheck = await checkRateLimit(userFingerprint, 10, 300); // 10 requests per 5 minutes
+
         if (!rateLimitCheck.allowed) {
-            logger.warn('Google auth rate limit exceeded', { ip, remaining: rateLimitCheck.remaining });
+            logger.warn('Google authentication rate limit exceeded', {
+                ip,
+                fingerprint: userFingerprint,
+                remaining: rateLimitCheck.remaining
+            });
+
             return res.status(429).json({
                 success: false,
-                message: 'تعداد درخواست‌های احراز هویت بیش از حد مجاز است. لطفاً چند دقیقه دیگر تلاش کنید.'
+                message: 'Too many authentication attempts. Please wait a few minutes before trying again.',
+                retryAfter: 300 // 5 minutes in seconds
             });
         }
 
-        // ۱. بررسی وجود code یا token
+        // Validate input parameters
         if (!code && !idToken) {
-            logger.warn('Google auth failed - no code or token provided');
+            logger.warn('Google authentication failed - missing credentials');
             return res.status(400).json({
                 success: false,
-                message: 'Google authorization code or token is required'
+                message: 'Google authorization code or ID token is required',
+                code: 'MISSING_CREDENTIALS'
             });
         }
 
         let googleUser;
         let usedIdToken = '';
+        let authFlow: 'authorization_code' | 'direct_token' = 'direct_token';
 
-        // ۲. اگر code داریم، باید به idToken تبدیل کنیم
+        // Process authorization code flow
         if (code) {
-            logger.debug('Processing authorization code flow');
+            authFlow = 'authorization_code';
+            logger.debug('Processing Google authorization code flow');
 
-            // 🔥 بررسی کش برای code
-            const codeCacheKey = `${CACHE_KEYS.GOOGLE_TOKENS}:code:${code}`;
-            const cachedToken = await cacheGet(codeCacheKey);
+            try {
+                // Check cache for previously processed code
+                const codeCacheKey = `google_auth:code:${code}`;
+                const cachedAuth = await cacheGet(codeCacheKey);
 
-            if (cachedToken) {
-                usedIdToken = cachedToken.idToken;
-                googleUser = cachedToken.userInfo;
-                logger.debug('Using cached Google token from code', { code });
-            } else {
-                try {
+                if (cachedAuth) {
+                    usedIdToken = cachedAuth.idToken;
+                    googleUser = cachedAuth.userInfo;
+                    logger.debug('Using cached Google authentication data', { code });
+                } else {
+                    // Exchange authorization code for tokens
                     usedIdToken = await GoogleAuthService.getTokenFromCode(code);
                     googleUser = await GoogleAuthService.verifyToken(usedIdToken);
 
-                    // 🔥 ذخیره در کش
+                    // Cache the authentication data for future use
                     await cacheSet(codeCacheKey, {
                         idToken: usedIdToken,
-                        userInfo: googleUser
+                        userInfo: googleUser,
+                        flow: 'authorization_code'
                     }, CACHE_TTL.SHORT);
 
-                } catch (error: any) {
-                    logger.error('Failed to process authorization code', {
-                        error: error.message
-                    });
-                    return res.status(400).json({
-                        success: false,
-                        message: `Invalid authorization code: ${error.message}`
-                    });
+                    logger.debug('Successfully exchanged authorization code for tokens');
                 }
+            } catch (error: any) {
+                logger.error('Google authorization code processing failed', {
+                    error: error.message,
+                    codeLength: code?.length
+                });
+
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid or expired authorization code',
+                    code: 'INVALID_AUTHORIZATION_CODE',
+                    details: error.message
+                });
             }
         }
-        // ۳. اگر مستقیم idToken داریم
+        // Process direct ID token flow
         else if (idToken) {
-            logger.debug('Processing direct token flow');
+            authFlow = 'direct_token';
+            logger.debug('Processing Google direct ID token flow');
 
-            // 🔥 بررسی کش برای token
-            const tokenCacheKey = `${CACHE_KEYS.GOOGLE_TOKENS}:token:${idToken}`;
-            const cachedUser = await cacheGet(tokenCacheKey);
+            try {
+                // Check cache for token validation
+                const tokenCacheKey = `google_auth:token:${idToken.substring(0, 20)}`;
+                const cachedUser = await cacheGet(tokenCacheKey);
 
-            if (cachedUser) {
-                usedIdToken = idToken;
-                googleUser = cachedUser;
-                logger.debug('Using cached Google user from token', { token: idToken.substring(0, 20) + '...' });
-            } else {
-                usedIdToken = idToken;
-                googleUser = await GoogleAuthService.verifyToken(idToken);
+                if (cachedUser) {
+                    usedIdToken = idToken;
+                    googleUser = cachedUser;
+                    logger.debug('Using cached Google user data from token');
+                } else {
+                    usedIdToken = idToken;
+                    googleUser = await GoogleAuthService.verifyToken(idToken);
 
-                // 🔥 ذخیره در کش
-                await cacheSet(tokenCacheKey, googleUser, CACHE_TTL.MEDIUM);
+                    // Cache user information for future requests
+                    await cacheSet(tokenCacheKey, googleUser, CACHE_TTL.MEDIUM);
+
+                    logger.debug('Successfully verified Google ID token');
+                }
+            } catch (error: any) {
+                logger.error('Google ID token verification failed', {
+                    error: error.message,
+                    tokenLength: idToken?.length
+                });
+
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid Google ID token',
+                    code: 'INVALID_ID_TOKEN',
+                    details: error.message
+                });
             }
         }
 
-        // ✅ بررسی وجود ایمیل (ضروری)
+        // Validate Google user data
         if (!googleUser?.email) {
-            logger.error('Google auth failed - no email in token');
+            logger.error('Google authentication failed - missing email in user data');
             return res.status(400).json({
                 success: false,
-                message: 'Google account email is required'
+                message: 'Google account email is required for authentication',
+                code: 'MISSING_EMAIL'
             });
         }
 
-        logger.debug('Google authentication successful', {
+        if (!googleUser.googleId) {
+            logger.error('Google authentication failed - missing Google ID in user data');
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid Google user data received',
+                code: 'MISSING_GOOGLE_ID'
+            });
+        }
+
+        logger.debug('Google authentication data validated successfully', {
             email: googleUser.email,
             googleId: googleUser.googleId,
-            flow: code ? 'authorization_code' : 'direct_token'
+            emailVerified: googleUser.emailVerified,
+            flow: authFlow
         });
 
-        // ۴. پیدا کردن کاربر موجود
-        // 🔥 اول بررسی کش
-        const userByEmailKey = `${CACHE_KEYS.GOOGLE_USER}:email:${googleUser.email}`;
-        const userByGoogleIdKey = `${CACHE_KEYS.GOOGLE_USER}:google:${googleUser.googleId}`;
+        // Find or create user account
+        const userResult = await findOrCreateGoogleUser(googleUser, req);
+
+        if (!userResult.success) {
+            return res.status(userResult.statusCode || 500).json({
+                success: false,
+                message: userResult.message,
+                code: userResult.code
+            });
+        }
+
+        const { user, requiresPasswordSetup, tempToken, isNewUser } = userResult;
+
+        // Handle password setup requirement for new users or users without passwords
+        if (requiresPasswordSetup) {
+            logger.info('Google user requires password setup', {
+                email: googleUser.email,
+                isNewUser,
+                userId: user?._id?.toString()
+            });
+
+            return res.json({
+                success: true,
+                requiresPasswordSetup: true,
+                tempToken,
+                message: isNewUser
+                    ? 'Please set your password to complete registration'
+                    : 'Please set a password for your account',
+                user: user ? {
+                    id: user._id.toString(),
+                    name: user.name,
+                    email: user.email,
+                    isNewUser
+                } : {
+                    email: googleUser.email,
+                    name: googleUser.name,
+                    isNewUser: true
+                }
+            });
+        }
+
+        // Generate main authentication token for existing users with passwords
+        const expiresIn = rememberMe ? '120d' : '1d';
+        const token = jwt.sign(
+            {
+                userId: user!._id.toString(),
+                authProvider: 'google'
+            },
+            process.env.JWT_SECRET!,
+            { expiresIn }
+        );
+
+        // Store authentication session in cache
+        const sessionKey = generateKey.userSession(user!._id.toString());
+        await cacheSet(sessionKey, {
+            userId: user!._id.toString(),
+            provider: 'google',
+            loginTime: new Date().toISOString(),
+            expiresIn,
+            ip,
+            userAgent: req.get('User-Agent')
+        }, rememberMe ? CACHE_TTL.VERY_LONG : CACHE_TTL.LONG);
+
+        // Update user last login timestamp
+        await User.findByIdAndUpdate(user!._id, {
+            lastLogin: new Date(),
+            lastLoginIp: ip
+        });
+
+        logger.info('Google authentication completed successfully', {
+            userId: user!._id.toString(),
+            email: user!.email,
+            provider: 'google',
+            isNewUser: false,
+            authFlow
+        });
+
+        // Successful authentication response
+        res.json({
+            success: true,
+            requiresPasswordSetup: false,
+            message: 'Authentication successful',
+            token,
+            expiresIn,
+            user: {
+                id: user!._id.toString(),
+                name: user!.name,
+                email: user!.email,
+                role: user!.role,
+                authProvider: user!.authProvider,
+                emailVerified: user!.emailVerified,
+                avatar: user!.avatar
+            },
+            session: {
+                loginTime: new Date().toISOString(),
+                expiresIn,
+                provider: 'google'
+            }
+        });
+
+    } catch (error: any) {
+        logger.error('Google authentication process failed completely', {
+            error: error.message,
+            stack: error.stack,
+            ip: req.ip,
+            userAgent: req.get('User-Agent')
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Google authentication service temporarily unavailable',
+            code: 'AUTH_SERVICE_ERROR',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+// Helper function to find or create Google user
+const findOrCreateGoogleUser = async (googleUser: any, req: AuthRequest) => {
+    try {
+        const { email, googleId, name, picture, emailVerified } = googleUser;
+
+        // Check cache for existing user
+        const userByEmailKey = generateKey.googleUser(email);
+        const userByGoogleIdKey = generateKey.googleUserById(googleId);
 
         let user = await cacheGet(userByEmailKey) || await cacheGet(userByGoogleIdKey);
 
         if (!user) {
-            // اگر در کش نیست، از دیتابیس بگیر
+            // User not in cache - check database
             user = await User.findOne({
                 $or: [
-                    { googleId: googleUser.googleId },
-                    { email: googleUser.email.toLowerCase() }
+                    { googleId: googleId },
+                    { email: email.toLowerCase() }
                 ]
             });
 
             if (user) {
-                // 🔥 ذخیره در کش
+                // Cache user information for future requests
                 await Promise.all([
                     cacheSet(userByEmailKey, user, CACHE_TTL.MEDIUM),
                     cacheSet(userByGoogleIdKey, user, CACHE_TTL.MEDIUM)
@@ -205,236 +316,314 @@ export const googleAuth = async (req: AuthRequest, res: Response) => {
 
         let requiresPasswordSetup = false;
         let tempToken = '';
+        let isNewUser = false;
 
+        // New user registration flow
         if (!user) {
-            // 🆕 کاربر جدید - نیاز به تنظیم رمز عبور دارد
-            logger.debug('New Google user - requiring password setup', {
-                email: googleUser.email
-            });
+            logger.debug('Creating new user account for Google authentication', { email });
 
-            // 🔥 ذخیره اطلاعات کاربر گوگل در کش
-            const tempUserKey = `${CACHE_KEYS.TEMP_TOKENS}:google:${googleUser.googleId}`;
+            // Check for existing email conflicts
+            const existingUser = await User.findOne({ email: email.toLowerCase() });
+            if (existingUser) {
+                return {
+                    success: false,
+                    message: 'An account with this email already exists',
+                    code: 'EMAIL_ALREADY_EXISTS',
+                    statusCode: 409
+                };
+            }
+
+            // Store temporary user data for password setup
+            const tempUserData = {
+                googleId,
+                email: email.toLowerCase(),
+                name: name || email.split('@')[0],
+                picture,
+                emailVerified: emailVerified || false
+            };
+
+            const tempUserKey = `google_temp_user:${googleId}`;
             await cacheSet(tempUserKey, {
-                googleUser: {
-                    googleId: googleUser.googleId,
-                    email: googleUser.email.toLowerCase(),
-                    name: googleUser.name || googleUser.email.split('@')[0],
-                    picture: googleUser.picture,
-                    emailVerified: googleUser.emailVerified || false
-                },
-                type: 'google_password_setup',
-                createdAt: new Date().toISOString()
+                ...tempUserData,
+                type: 'google_registration',
+                createdAt: new Date().toISOString(),
+                ip: req.ip
             }, CACHE_TTL.MEDIUM);
 
-            // ایجاد یک توکن موقت برای تنظیم رمز عبور
+            // Generate temporary token for password setup
             tempToken = jwt.sign(
                 {
-                    googleUser: {
-                        googleId: googleUser.googleId,
-                        email: googleUser.email.toLowerCase(),
-                        name: googleUser.name || googleUser.email.split('@')[0],
-                        picture: googleUser.picture,
-                        emailVerified: googleUser.emailVerified || false
-                    },
-                    type: 'google_password_setup'
+                    googleUser: tempUserData,
+                    type: 'google_password_setup',
+                    registration: true
                 },
                 process.env.JWT_SECRET!,
                 { expiresIn: '1h' }
             );
 
             requiresPasswordSetup = true;
+            isNewUser = true;
 
-            LoggerService.authLog('unknown', 'google_registration_pending', {
+            LoggerService.authLog('unknown', 'google_registration_initiated', {
                 provider: 'google',
-                email: googleUser.email,
+                email,
                 requiresPasswordSetup: true
             });
 
-        } else {
-            // 🔄 کاربر موجود
-            logger.debug('Existing user found for Google auth', {
-                userId: user._id.toString(),
-                existingProvider: user.authProvider
-            });
+            return {
+                success: true,
+                requiresPasswordSetup,
+                tempToken,
+                isNewUser,
+                user: null
+            };
+        }
 
-            // اگر کاربر با ایمیل وجود داره اما Google auth نداره
-            if (!user.googleId) {
-                user.googleId = googleUser.googleId;
-                user.authProvider = 'google';
-            }
+        // Existing user flow
+        logger.debug('Processing existing user for Google authentication', {
+            userId: user._id.toString(),
+            existingProvider: user.authProvider
+        });
 
-            // آپدیت lastLogin
-            user.lastLogin = new Date();
-            user.emailVerified = googleUser.emailVerified || false;
+        // Update user record if needed
+        const updates: any = {};
+        let needsUpdate = false;
 
-            await user.save();
+        if (!user.googleId) {
+            updates.googleId = googleId;
+            updates.authProvider = 'google';
+            needsUpdate = true;
+        }
 
-            // 🔥 آپدیت کش
+        if (user.emailVerified !== emailVerified) {
+            updates.emailVerified = emailVerified || false;
+            needsUpdate = true;
+        }
+
+        if (user.avatar !== picture) {
+            updates.avatar = picture;
+            needsUpdate = true;
+        }
+
+        updates.lastLogin = new Date();
+        updates.lastLoginIp = req.ip;
+        needsUpdate = true;
+
+        if (needsUpdate) {
+            user = await User.findByIdAndUpdate(
+                user._id,
+                updates,
+                { new: true }
+            );
+
+            // Update cache with new user data
             await Promise.all([
                 cacheSet(userByEmailKey, user, CACHE_TTL.MEDIUM),
                 cacheSet(userByGoogleIdKey, user, CACHE_TTL.MEDIUM)
             ]);
+        }
 
-            // اگر کاربر رمز عبور ندارد (کاربر قدیمی گوگل)، نیاز به تنظیم رمز عبور دارد
-            if (!user.password) {
-                // 🔥 ذخیره در کش برای تنظیم رمز عبور
-                const tempSetupKey = `${CACHE_KEYS.TEMP_TOKENS}:password_setup:${user._id.toString()}`;
-                await cacheSet(tempSetupKey, {
+        // Check if password setup is required for existing users
+        if (!user.password) {
+            const tempSetupKey = `google_password_setup:${user._id.toString()}`;
+            await cacheSet(tempSetupKey, {
+                userId: user._id.toString(),
+                type: 'google_password_setup',
+                createdAt: new Date().toISOString(),
+                ip: req.ip
+            }, CACHE_TTL.MEDIUM);
+
+            tempToken = jwt.sign(
+                {
                     userId: user._id.toString(),
                     type: 'google_password_setup',
-                    createdAt: new Date().toISOString()
-                }, CACHE_TTL.MEDIUM);
+                    registration: false
+                },
+                process.env.JWT_SECRET!,
+                { expiresIn: '1h' }
+            );
 
-                tempToken = jwt.sign(
-                    {
-                        userId: user._id.toString(),
-                        type: 'google_password_setup'
-                    },
-                    process.env.JWT_SECRET!,
-                    { expiresIn: '1h' }
-                );
-                requiresPasswordSetup = true;
-            }
-
-            LoggerService.authLog(user._id.toString(), 'google_login', {
-                provider: 'google',
-                requiresPasswordSetup
-            });
+            requiresPasswordSetup = true;
         }
 
-        // ۵. اگر نیاز به تنظیم رمز عبور دارد
-        if (requiresPasswordSetup) {
-            logger.info('Google user requires password setup', {
-                email: googleUser.email,
-                isNewUser: !user
-            });
-
-            return res.json({
-                success: true,
-                requiresPasswordSetup: true,
-                tempToken,
-                message: 'Please set your password to complete registration',
-                user: user ? {
-                    id: user._id.toString(),
-                    name: user.name,
-                    email: user.email
-                } : null
-            });
-        }
-
-        // ۶. اگر کاربر کامل است و رمز عبور دارد
-        const expiresIn = rememberMe ? '120d' : '1d';
-        const token = jwt.sign(
-            { userId: user!._id.toString() },
-            process.env.JWT_SECRET!,
-            { expiresIn }
-        );
-
-        // 🔥 ذخیره session در Redis
-        const sessionKey = `${CACHE_KEYS.AUTH_SESSIONS}:${user!._id.toString()}`;
-        await cacheSet(sessionKey, {
-            userId: user!._id.toString(),
+        LoggerService.authLog(user._id.toString(), 'google_login_processed', {
             provider: 'google',
-            loginTime: new Date().toISOString(),
-            expiresIn
-        }, rememberMe ? CACHE_TTL.VERY_LONG : CACHE_TTL.LONG);
-
-        logger.info('Google authentication successful', {
-            userId: user!._id.toString(),
-            email: user!.email,
-            provider: 'google'
+            requiresPasswordSetup,
+            isNewUser: false
         });
 
-        // ۷. پاسخ به فرانت‌اند
-        res.json({
+        return {
             success: true,
-            requiresPasswordSetup: false,
-            message: 'Login successful',
-            token,
-            expiresIn,
-            user: {
-                id: user!._id.toString(),
-                name: user!.name,
-                email: user!.email,
-                role: user!.role,
-                authProvider: user!.authProvider,
-                emailVerified: user!.emailVerified
-            }
+            user,
+            requiresPasswordSetup,
+            tempToken,
+            isNewUser: false
+        };
+
+    } catch (error) {
+        logger.error('Error in findOrCreateGoogleUser', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            email: googleUser.email
         });
 
-    } catch (error: any) {
-        logger.error('Google authentication failed', {
-            error: error.message,
-            stack: error.stack
-        });
-        res.status(401).json({
-            success: false,
-            message: 'Google authentication failed',
-            error: error.message
-        });
+        throw error;
     }
 };
 
-// 🆕 تابع برای دریافت اطلاعات session از کش
+// Enhanced Google authentication session management
 export const getGoogleAuthSession = async (userId: string): Promise<any> => {
     try {
-        const sessionKey = `${CACHE_KEYS.AUTH_SESSIONS}:${userId}`;
-        return await cacheGet(sessionKey);
-    } catch (error) {
-        logger.error('Error getting Google auth session', { userId, error });
-        return null;
-    }
-};
+        const sessionKey = generateKey.userSession(userId);
+        const session = await cacheGet(sessionKey);
 
-// 🆕 تابع برای حذف session از کش
-export const clearGoogleAuthSession = async (userId: string): Promise<void> => {
-    try {
-        const sessionKey = `${CACHE_KEYS.AUTH_SESSIONS}:${userId}`;
-        await cacheDelete(sessionKey);
-
-        // حذف اطلاعات کاربر از کش
-        const userKeys = await redisClient.keys(`${CACHE_KEYS.GOOGLE_USER}:*:${userId}`);
-        if (userKeys.length > 0) {
-            await redisClient.del(userKeys);
+        if (session && session.provider === 'google') {
+            logger.debug('Retrieved Google authentication session from cache', { userId });
+            return session;
         }
 
-        logger.debug('Google auth session cleared', { userId });
+        return null;
     } catch (error) {
-        logger.error('Error clearing Google auth session', { userId, error });
+        logger.error('Error retrieving Google authentication session', {
+            userId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
+        return null;
     }
 };
 
-// 🆕 تابع برای بررسی وجود کاربر گوگل از کش
+// Enhanced session clearing with comprehensive cache cleanup
+export const clearGoogleAuthSession = async (userId: string): Promise<void> => {
+    try {
+        const sessionKey = generateKey.userSession(userId);
+        await cacheDelete(sessionKey);
+
+        // Clear all Google-related cache entries
+        const patterns = [
+            `google_user:*:${userId}`,
+            `google_auth:*:${userId}`,
+            `google_temp_user:*`,
+            `google_password_setup:${userId}`
+        ];
+
+        for (const pattern of patterns) {
+            const keys = await redisClient.keys(pattern);
+            if (keys.length > 0) {
+                await redisClient.del(keys);
+            }
+        }
+
+        logger.debug('Google authentication session cleared completely', { userId });
+    } catch (error) {
+        logger.error('Error clearing Google authentication session', {
+            userId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
+// Get cached Google user with enhanced error handling
 export const getCachedGoogleUser = async (email: string, googleId: string): Promise<any> => {
     try {
-        const userByEmail = await cacheGet(`${CACHE_KEYS.GOOGLE_USER}:email:${email}`);
+        const userByEmail = await cacheWithFallback(
+            generateKey.googleUser(email),
+            async () => null, // Don't fetch from DB if not in cache
+            CACHE_TTL.SHORT
+        );
+
         if (userByEmail) return userByEmail;
 
-        const userByGoogleId = await cacheGet(`${CACHE_KEYS.GOOGLE_USER}:google:${googleId}`);
-        if (userByGoogleId) return userByGoogleId;
+        const userByGoogleId = await cacheWithFallback(
+            generateKey.googleUserById(googleId),
+            async () => null, // Don't fetch from DB if not in cache
+            CACHE_TTL.SHORT
+        );
 
-        return null;
+        return userByGoogleId;
     } catch (error) {
-        logger.error('Error getting cached Google user', { email, googleId, error });
+        logger.error('Error retrieving cached Google user', {
+            email,
+            googleId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
         return null;
     }
 };
 
-// 🆕 تابع برای حذف کاربر گوگل از کش
+// Enhanced cache invalidation for Google users
 export const invalidateGoogleUserCache = async (email: string, googleId: string, userId?: string): Promise<void> => {
     try {
         const keysToDelete = [
-            `${CACHE_KEYS.GOOGLE_USER}:email:${email}`,
-            `${CACHE_KEYS.GOOGLE_USER}:google:${googleId}`,
-            `${CACHE_KEYS.AUTH_SESSIONS}:${userId}`,
-            `${CACHE_KEYS.TEMP_TOKENS}:google:${googleId}`,
-            `${CACHE_KEYS.TEMP_TOKENS}:password_setup:${userId}`
+            generateKey.googleUser(email),
+            generateKey.googleUserById(googleId),
+            generateKey.userSession(userId!),
+            `google_temp_user:${googleId}`,
+            `google_password_setup:${userId}`,
+            `google_auth:*:${userId}`
         ].filter(Boolean);
 
-        await Promise.all(keysToDelete.map(key => cacheDelete(key)));
+        // Delete direct keys
+        const directKeys = keysToDelete.filter(k => !k.includes('*'));
+        if (directKeys.length > 0) {
+            await redisClient.del(directKeys);
+        }
 
-        logger.debug('Google user cache invalidated', { email, googleId, userId });
+        // Delete pattern-based keys
+        for (const pattern of keysToDelete.filter(k => k.includes('*'))) {
+            const matchingKeys = await redisClient.keys(pattern);
+            if (matchingKeys.length > 0) {
+                await redisClient.del(matchingKeys);
+            }
+        }
+
+        logger.debug('Google user cache invalidated comprehensively', { email, googleId, userId });
     } catch (error) {
-        logger.error('Error invalidating Google user cache', { email, googleId, userId, error });
+        logger.error('Error invalidating Google user cache', {
+            email,
+            googleId,
+            userId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
     }
 };
+
+// Google authentication health check
+export const checkGoogleAuthHealth = async (): Promise<{
+    healthy: boolean;
+    service: string;
+    details?: string;
+}> => {
+    try {
+        // Test Google service availability with a mock verification
+        const testToken = 'test-token';
+        try {
+            await GoogleAuthService.verifyToken(testToken);
+        } catch (error) {
+            // Expected to fail with test token, but service is responsive
+            if (error instanceof Error && error.message.includes('Invalid Google token')) {
+                return {
+                    healthy: true,
+                    service: 'google_auth',
+                    details: 'Service responsive'
+                };
+            }
+        }
+
+        return {
+            healthy: true,
+            service: 'google_auth',
+            details: 'Service available'
+        };
+    } catch (error) {
+        logger.error('Google authentication health check failed', {
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
+
+        return {
+            healthy: false,
+            service: 'google_auth',
+            details: error instanceof Error ? error.message : 'Service unavailable'
+        };
+    }
+};
+
+// Import redisClient for cache operations

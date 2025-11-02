@@ -1,4 +1,4 @@
-// backend/src/routes/Testimonials/testimonialRoutes.ts
+// backend/src/routes/testimonialRoutes.ts
 import express from 'express';
 import { authenticateToken } from '../../middlewares/auth';
 import { requireAdmin } from '../../middlewares/adminAuth';
@@ -14,12 +14,12 @@ import {
 
 const router = express.Router();
 
-// ✅ Routes عمومی برای کاربران - بدون احراز هویت
+// ✅ Public routes for users - no authentication required
 router.get('/testimonials/approved', getApprovedTestimonials);
 router.post('/testimonials', createTestimonial);
 router.get('/testimonials/stats', getTestimonialStats);
 
-// ✅ Routes مدیریتی برای ادمین - با احراز هویت
+// ✅ Administrative routes for admin - with authentication
 router.get('/admin/testimonials', authenticateToken, requireAdmin, getAllTestimonials);
 router.patch('/admin/testimonials/:id/approve', authenticateToken, requireAdmin, approveTestimonial);
 router.patch('/admin/testimonials/:id/reject', authenticateToken, requireAdmin, rejectTestimonial);

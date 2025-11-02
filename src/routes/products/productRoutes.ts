@@ -1,4 +1,4 @@
-// backend/src/routes/productRoutes.ts - به‌روزرسانی شده
+// backend/src/routes/productRoutes.ts - Updated with English comments
 import express from 'express';
 import { authenticateToken } from '../../middlewares/auth';
 import { requireAdmin } from '../../middlewares/adminAuth';
@@ -10,29 +10,29 @@ import {
     getProductById,
     deleteProductImage,
     getAdminProducts,
-    getFeaturedProducts,    // برای صفحه home - بخش offer
-    getMenuProducts,        // برای صفحه home - بخش menu
-    searchProducts,         // برای جستجو در menu
-    getPopularProducts      // برای محصولات پرطرفدار در menu
+    getFeaturedProducts,    // For home page - offer section
+    getMenuProducts,        // For home page - menu section
+    searchProducts,         // For menu search
+    getPopularProducts      // For popular products in menu
 } from './productController';
 import { productValidation } from '../../middlewares/productValidation';
 
 const router = express.Router();
 
-// 🆕 Routes برای صفحات فرانت‌اند - بدون نیاز به احراز هویت
-router.get('/home/offer', getFeaturedProducts);     // صفحه home - بخش offer
-router.get('/home/menu', getMenuProducts);          // صفحه home - بخش menu
-router.get('/home/menu/search', searchProducts);    // جستجو در منو
-router.get('/home/menu/popular', getPopularProducts); // محصولات پرطرفدار در منو
+// 🆕 Frontend Routes - No authentication required
+router.get('/home/offer', getFeaturedProducts);     // Home page - offer section
+router.get('/home/menu', getMenuProducts);          // Home page - menu section
+router.get('/home/menu/search', searchProducts);    // Search in menu
+router.get('/home/menu/popular', getPopularProducts); // Popular products in menu
 
-// Routes عمومی (برای موارد خاص)
-router.get('/products/:id', getProductById); // فقط برای مشاهده جزئیات محصول
+// General Routes (for specific cases)
+router.get('/products/:id', getProductById); // Only for viewing product details
 
-// Routes مدیریتی (نیاز به ادمین)
+// Administrative Routes (Admin required)
 router.use(authenticateToken);
 router.use(requireAdmin);
 
-// مدیریت محصولات - فقط برای ادمین
+// Product Management - Admin only
 router.post('/admin/products', upload.array('images', 5), productValidation, createProduct);
 router.put('/admin/products/:id', upload.array('images', 5), productValidation, updateProduct);
 router.delete('/admin/products/:id', deleteProduct);

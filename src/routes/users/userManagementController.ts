@@ -1,71 +1,21 @@
-// backend/src/controllers/userManagementController.ts - بهینه‌سازی شده با Redis
+// backend/src/controllers/userManagementController.ts - Optimized with cache utilities
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import User from '../../models/users';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import jwt from 'jsonwebtoken';
-import { redisClient } from '../../config/redis';
+import {
+    cacheGet,
+    cacheSet,
+    cacheDelete,
+    clearUserCache,
+    generateKey,
+    CACHE_TTL,
+    cacheWithFallback
+} from '../../utils/cacheUtils';
 
-// کلیدهای کش
-const CACHE_KEYS = {
-    USERS_LIST: 'users_list',
-    USER_DETAIL: 'user_detail',
-    USER_STATS: 'user_stats',
-    USER_SESSION: 'user_session'
-};
-
-// زمان انقضای کش (ثانیه)
-const CACHE_TTL = {
-    SHORT: 300,    // 5 دقیقه
-    MEDIUM: 1800,  // 30 دقیقه
-    LONG: 3600     // 1 ساعت
-};
-
-// توابع کمکی کش
-const cacheGet = async (key: string): Promise<any> => {
-    try {
-        const cached = await redisClient.get(key);
-        return cached ? JSON.parse(cached) : null;
-    } catch (error) {
-        logger.error('Cache get error', { key, error });
-        return null;
-    }
-};
-
-const cacheSet = async (key: string, data: any, ttl: number = CACHE_TTL.MEDIUM): Promise<void> => {
-    try {
-        await redisClient.setEx(key, ttl, JSON.stringify(data));
-    } catch (error) {
-        logger.error('Cache set error', { key, error });
-    }
-};
-
-const invalidateUserCache = async (userId?: string): Promise<void> => {
-    try {
-        const listKeys = await redisClient.keys(`${CACHE_KEYS.USERS_LIST}:*`);
-        const statsKeys = await redisClient.keys(`${CACHE_KEYS.USER_STATS}:*`);
-
-        let allKeys = [...listKeys, ...statsKeys];
-
-        // اگر userId مشخص شده، کش جزئیات کاربر را هم حذف کن
-        if (userId) {
-            const userDetailKey = `${CACHE_KEYS.USER_DETAIL}:${userId}`;
-            allKeys.push(userDetailKey);
-        }
-
-        if (allKeys.length > 0) {
-            await redisClient.del(allKeys);
-            logger.debug('User cache invalidated', {
-                keysCount: allKeys.length,
-                userId
-            });
-        }
-    } catch (error) {
-        logger.error('User cache invalidation error', { error });
-    }
-};
-
+// Get all users with pagination and filtering
 export const getAllUsers = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -76,75 +26,69 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
             isActive = ''
         } = req.query;
 
-        const cacheKey = `${CACHE_KEYS.USERS_LIST}:${page}:${limit}:${search}:${role}:${isActive}`;
+        const cacheKey = `users_list:${page}:${limit}:${search}:${role}:${isActive}`;
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            logger.debug('Serving users list from cache', { cacheKey });
-            return res.json({
-                ...cached,
-                fromCache: true
-            });
-        }
+        const responseData = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                // Build search filter
+                const searchFilter: any = {};
 
-        // ساخت شرط جستجو
-        const searchFilter: any = {};
+                // Exclude current admin from results
+                searchFilter._id = { $ne: req.userId };
 
-        if (search) {
-            searchFilter.$or = [
-                { name: { $regex: search, $options: 'i' } },
-                { email: { $regex: search, $options: 'i' } }
-            ];
-        }
+                // Search by name or email
+                if (search) {
+                    searchFilter.$or = [
+                        { name: { $regex: search, $options: 'i' } },
+                        { email: { $regex: search, $options: 'i' } }
+                    ];
+                }
 
-        if (role) {
-            searchFilter.role = role;
-        } else {
-            // به طور پیش‌فرض، کاربران معمولی و ادمین‌ها را نشان بده
-            searchFilter.role = { $in: ['user', 'admin'] };
-        }
+                // Filter by role
+                if (role) {
+                    searchFilter.role = role;
+                } else {
+                    // Default: show regular users and admins (not super_admins)
+                    searchFilter.role = { $in: ['user', 'admin'] };
+                }
 
-        if (isActive !== '') {
-            searchFilter.isActive = isActive === 'true';
-        }
+                // Filter by active status
+                if (isActive !== '') {
+                    searchFilter.isActive = isActive === 'true';
+                }
 
-        // کاربران را بگیر (به جز خود کاربر فعلی)
-        searchFilter._id = { $ne: req.userId };
+                // Get users with pagination
+                const users = await User.find(searchFilter)
+                    .select('-password -emailVerificationCode -emailVerificationCodeExpires')
+                    .sort({ createdAt: -1 })
+                    .limit(Number(limit))
+                    .skip((Number(page) - 1) * Number(limit));
 
-        const users = await User.find(searchFilter)
-            .select('-password -emailVerificationCode -emailVerificationCodeExpires')
-            .sort({ createdAt: -1 })
-            .limit(Number(limit))
-            .skip((Number(page) - 1) * Number(limit));
+                const total = await User.countDocuments(searchFilter);
 
-        const total = await User.countDocuments(searchFilter);
-
-        const responseData = {
-            success: true,
-            users,
-            pagination: {
-                total,
-                page: Number(page),
-                limit: Number(limit),
-                totalPages: Math.ceil(total / Number(limit))
-            }
-        };
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, responseData, CACHE_TTL.SHORT);
+                return {
+                    success: true,
+                    users,
+                    pagination: {
+                        total,
+                        page: Number(page),
+                        limit: Number(limit),
+                        totalPages: Math.ceil(total / Number(limit))
+                    }
+                };
+            },
+            CACHE_TTL.SHORT
+        );
 
         LoggerService.userLog(req.userId!, 'get_all_users', {
             page,
             limit,
             search,
-            total
+            total: responseData.pagination.total
         });
 
-        res.json({
-            ...responseData,
-            fromCache: false
-        });
+        res.json(responseData);
 
     } catch (error) {
         LoggerService.errorLog('getAllUsers', error, {
@@ -152,42 +96,31 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت لیست کاربران'
+            message: 'Error retrieving users list'
         });
     }
 };
 
+// Get user by ID
 export const getUserById = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
-        const cacheKey = `${CACHE_KEYS.USER_DETAIL}:${id}`;
+        const cacheKey = generateKey.userDetail(id);
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            LoggerService.userLog(req.userId!, 'get_user_by_id', {
-                targetUserId: id,
-                fromCache: true
-            });
-            return res.json({
-                success: true,
-                user: cached,
-                fromCache: true
-            });
-        }
+        const user = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                const user = await User.findById(id)
+                    .select('-password -emailVerificationCode -emailVerificationCodeExpires');
 
-        const user = await User.findById(id)
-            .select('-password -emailVerificationCode -emailVerificationCodeExpires');
+                if (!user) {
+                    throw new Error('User not found');
+                }
 
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'کاربر یافت نشد'
-            });
-        }
-
-        // ذخیره در کش
-        await cacheSet(cacheKey, user, CACHE_TTL.MEDIUM);
+                return user;
+            },
+            CACHE_TTL.MEDIUM
+        );
 
         LoggerService.userLog(req.userId!, 'get_user_by_id', {
             targetUserId: id
@@ -195,8 +128,7 @@ export const getUserById = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            user,
-            fromCache: false
+            user
         });
 
     } catch (error) {
@@ -206,11 +138,12 @@ export const getUserById = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت اطلاعات کاربر'
+            message: 'Error retrieving user information'
         });
     }
 };
 
+// Admin login as user (impersonation)
 export const loginAsUser = async (req: AuthRequest, res: Response) => {
     try {
         const { userId } = req.body;
@@ -218,47 +151,41 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
         if (!userId) {
             return res.status(400).json({
                 success: false,
-                message: 'آیدی کاربر الزامی است'
+                message: 'User ID is required'
             });
         }
 
-        const cacheKey = `${CACHE_KEYS.USER_DETAIL}:${userId}`;
+        // Get target user information
+        const targetUser = await cacheWithFallback(
+            generateKey.userDetail(userId),
+            async () => {
+                const user = await User.findById(userId);
+                if (!user) {
+                    throw new Error('User not found');
+                }
+                return user;
+            },
+            CACHE_TTL.MEDIUM
+        );
 
-        // بررسی کش برای اطلاعات کاربر
-        let targetUser = await cacheGet(cacheKey);
-        if (!targetUser) {
-            // اگر در کش نیست، از دیتابیس بگیر
-            targetUser = await User.findById(userId);
-            if (targetUser) {
-                await cacheSet(cacheKey, targetUser, CACHE_TTL.MEDIUM);
-            }
-        }
-
-        if (!targetUser) {
-            return res.status(404).json({
-                success: false,
-                message: 'کاربر یافت نشد'
-            });
-        }
-
-        // بررسی اینکه کاربر غیرفعال نباشد
+        // Check if target user is active
         if (!targetUser.isActive) {
             return res.status(400).json({
                 success: false,
-                message: 'این کاربر غیرفعال است'
+                message: 'This user account is deactivated'
             });
         }
 
-        // پیدا کردن ادمین/سوپر ادمین فعلی
+        // Verify current admin permissions
         const currentAdmin = await User.findById(req.userId);
         if (!currentAdmin || (currentAdmin.role !== 'admin' && currentAdmin.role !== 'super_admin')) {
             return res.status(403).json({
                 success: false,
-                message: 'فقط ادمین‌ها مجاز به این عمل هستند'
+                message: 'Only administrators are authorized for this action'
             });
         }
 
-        // ایجاد توکن برای کاربر هدف
+        // Generate impersonation token
         const token = jwt.sign(
             {
                 userId: targetUser._id.toString(),
@@ -269,13 +196,13 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
             { expiresIn: '1h' }
         );
 
-        // ذخیره session در Redis
-        const sessionKey = `${CACHE_KEYS.USER_SESSION}:${targetUser._id.toString()}`;
+        // Store impersonation session in cache
+        const sessionKey = generateKey.userSession(targetUser._id.toString());
         await cacheSet(sessionKey, {
             adminId: currentAdmin._id.toString(),
             impersonatedAt: new Date().toISOString(),
             originalRole: targetUser.role
-        }, 3600); // 1 ساعت
+        }, 3600); // 1 hour TTL
 
         LoggerService.userLog(req.userId!, 'login_as_user', {
             targetUserId: userId,
@@ -293,7 +220,7 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            message: `ورود به حساب ${targetUser.name} با موفقیت انجام شد`,
+            message: `Successfully logged in as ${targetUser.name}`,
             token,
             user: {
                 id: targetUser._id.toString(),
@@ -312,21 +239,22 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در ورود به حساب کاربر'
+            message: 'Error during user impersonation'
         });
     }
 };
 
+// Update user status (activate/deactivate)
 export const updateUserStatus = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
         const { isActive } = req.body;
 
-        // جلوگیری از غیرفعال کردن خود
+        // Prevent self-deactivation
         if (id === req.userId) {
             return res.status(400).json({
                 success: false,
-                message: 'نمی‌توانید وضعیت خودتان را تغییر دهید'
+                message: 'You cannot change your own account status'
             });
         }
 
@@ -339,12 +267,12 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
         if (!user) {
             return res.status(404).json({
                 success: false,
-                message: 'کاربر یافت نشد'
+                message: 'User not found'
             });
         }
 
-        // 🔥 حذف کش مرتبط
-        await invalidateUserCache(id);
+        // Clear user cache to reflect status change
+        await clearUserCache(id);
 
         LoggerService.userLog(req.userId!, 'update_user_status', {
             targetUserId: id,
@@ -353,7 +281,7 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            message: `وضعیت کاربر ${isActive ? 'فعال' : 'غیرفعال'} شد`,
+            message: `User account ${isActive ? 'activated' : 'deactivated'} successfully`,
             user
         });
 
@@ -364,61 +292,60 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در تغییر وضعیت کاربر'
+            message: 'Error updating user status'
         });
     }
 };
 
+// Get user statistics for dashboard
 export const getUserStats = async (req: AuthRequest, res: Response) => {
     try {
         const currentAdmin = await User.findById(req.userId);
-        const cacheKey = `${CACHE_KEYS.USER_STATS}:${currentAdmin?.role}`;
+        const cacheKey = `user_stats:${currentAdmin?.role}`;
 
-        // بررسی کش
-        const cached = await cacheGet(cacheKey);
-        if (cached) {
-            return res.json({
-                success: true,
-                stats: cached,
-                fromCache: true
-            });
-        }
+        const stats = await cacheWithFallback(
+            cacheKey,
+            async () => {
+                let userFilter: any = { _id: { $ne: req.userId } };
 
-        let userFilter: any = { _id: { $ne: req.userId } };
+                // Regular admins can only see regular users
+                if (currentAdmin?.role === 'admin') {
+                    userFilter.role = 'user';
+                }
 
-        // اگر ادمین معمولی است، فقط کاربران معمولی را نشان بده
-        if (currentAdmin?.role === 'admin') {
-            userFilter.role = 'user';
-        }
+                const totalUsers = await User.countDocuments(userFilter);
+                const activeUsers = await User.countDocuments({ ...userFilter, isActive: true });
+                const adminsCount = await User.countDocuments({ role: 'admin' });
 
-        const totalUsers = await User.countDocuments(userFilter);
-        const activeUsers = await User.countDocuments({ ...userFilter, isActive: true });
-        const adminsCount = await User.countDocuments({ role: 'admin' });
+                // New users in last 30 days
+                const thirtyDaysAgo = new Date();
+                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-        // آمار کاربران جدید در 30 روز گذشته
-        const thirtyDaysAgo = new Date();
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                const newUsers = await User.countDocuments({
+                    ...userFilter,
+                    createdAt: { $gte: thirtyDaysAgo }
+                });
 
-        const newUsers = await User.countDocuments({
-            ...userFilter,
-            createdAt: { $gte: thirtyDaysAgo }
-        });
+                const stats: any = {
+                    totalUsers,
+                    activeUsers,
+                    inactiveUsers: totalUsers - activeUsers,
+                    newUsersLast30Days: newUsers
+                };
 
-        const stats = {
-            totalUsers,
-            activeUsers,
-            inactiveUsers: totalUsers - activeUsers,
-            adminsCount: currentAdmin?.role === 'super_admin' ? adminsCount : undefined,
-            newUsersLast30Days: newUsers
-        };
+                // Only super admin can see admin counts
+                if (currentAdmin?.role === 'super_admin') {
+                    stats.adminsCount = adminsCount;
+                }
 
-        // ذخیره در کش
-        await cacheSet(cacheKey, stats, CACHE_TTL.SHORT);
+                return stats;
+            },
+            CACHE_TTL.SHORT
+        );
 
         res.json({
             success: true,
-            stats,
-            fromCache: false
+            stats
         });
 
     } catch (error) {
@@ -427,29 +354,35 @@ export const getUserStats = async (req: AuthRequest, res: Response) => {
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت آمار کاربران'
+            message: 'Error retrieving user statistics'
         });
     }
 };
 
-// 🆕 تابع برای دریافت اطلاعات session از Redis
+// Get impersonation session from cache
 export const getImpersonationSession = async (userId: string): Promise<any> => {
     try {
-        const sessionKey = `${CACHE_KEYS.USER_SESSION}:${userId}`;
+        const sessionKey = generateKey.userSession(userId);
         return await cacheGet(sessionKey);
     } catch (error) {
-        logger.error('Error getting impersonation session', { userId, error });
+        logger.error('Error getting impersonation session', {
+            userId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
         return null;
     }
 };
 
-// 🆕 تابع برای حذف session از Redis
+// Clear impersonation session
 export const clearImpersonationSession = async (userId: string): Promise<void> => {
     try {
-        const sessionKey = `${CACHE_KEYS.USER_SESSION}:${userId}`;
-        await redisClient.del(sessionKey);
+        const sessionKey = generateKey.userSession(userId);
+        await cacheDelete(sessionKey);
         logger.debug('Impersonation session cleared', { userId });
     } catch (error) {
-        logger.error('Error clearing impersonation session', { userId, error });
+        logger.error('Error clearing impersonation session', {
+            userId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
     }
 };
