@@ -1,19 +1,20 @@
-// backend/src/middlewares/auth.ts - Optimized with Redis
+// backend/src/middlewares/auth.ts - Fixed version
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { cacheWithFallback, generateKey, CACHE_TTL } from '../utils/cacheUtils';
 import User from '../models/users';
 import { logger } from '../config/logger';
 
+// Extend Express Request interface to include user data
 export interface AuthRequest extends Request {
     userId?: string;
     user?: any;
     impersonatedBy?: string;
 }
 
+// Middleware to authenticate JWT tokens
 export const authenticateToken = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = authHeader && authHeader.split(' ')[1]; // Extract Bearer token
 
     if (!token) {
         return res.status(401).json({
@@ -23,15 +24,12 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
     }
 
     try {
-        // Verify token
+        // Verify JWT token
         const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
 
-        // Get user data with cache
-        const user = await cacheWithFallback(
-            generateKey.userProfile(decoded.userId),
-            async () => await User.findById(decoded.userId).select('-password'),
-            CACHE_TTL.USER_PROFILE
-        );
+        // Get user data from database - without cache for security
+        const user = await User.findById(decoded.userId)
+            .select('-password -emailVerificationCode -emailVerificationCodeExpires');
 
         if (!user) {
             return res.status(403).json({
@@ -47,7 +45,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
             });
         }
 
-        // Set user data in request
+        // Set user data in request object for use in subsequent middleware/routes
         req.userId = decoded.userId;
         req.user = {
             userId: decoded.userId,
@@ -65,6 +63,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
 
         next();
     } catch (error) {
+        // Handle specific JWT errors
         if (error instanceof jwt.TokenExpiredError) {
             return res.status(403).json({
                 success: false,
@@ -87,7 +86,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
     }
 };
 
-// Middleware for requiring email verification
+// Middleware to require email verification for specific routes
 export const requireEmailVerification = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
         if (!req.user || !req.user.userId) {
@@ -97,17 +96,21 @@ export const requireEmailVerification = async (req: AuthRequest, res: Response, 
             });
         }
 
-        // Get fresh user data to check email verification status
-        const user = await cacheWithFallback(
-            generateKey.userProfile(req.user.userId),
-            async () => await User.findById(req.user.userId).select('emailVerified'),
-            CACHE_TTL.SHORT
-        );
+        // Get fresh user data to check email verification status - without cache
+        const user = await User.findById(req.user.userId)
+            .select('emailVerified isActive');
 
         if (!user) {
             return res.status(404).json({
                 success: false,
                 message: 'User not found'
+            });
+        }
+
+        if (!user.isActive) {
+            return res.status(403).json({
+                success: false,
+                message: 'User account is deactivated'
             });
         }
 

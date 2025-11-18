@@ -1,4 +1,4 @@
-// backend/src/services/loggerServices.ts - اصلاح مشکل تایپ
+// backend/src/services/loggerServices.ts - Fixed type issue
 import { logger } from '../config/logger';
 import { cacheWithFallback, generateKey, CACHE_TTL } from '../utils/cacheUtils';
 
@@ -71,14 +71,14 @@ export class LoggerService {
         logger.info(`Product action: ${action}`, logEntry);
     }
 
-    // System statistics with caching - ساده‌سازی شده
+    // System statistics with caching - simplified
     static async getSystemStats() {
         const cacheKey = 'system_stats';
 
         return await cacheWithFallback(
             cacheKey,
             async () => {
-                // این بخش در پیاده‌سازی واقعی از دیتابیس داده می‌گیرد
+                // This section would fetch data from database in real implementation
                 return {
                     totalUsers: 0,
                     activeUsers: 0,

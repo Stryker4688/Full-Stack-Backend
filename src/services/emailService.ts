@@ -5,6 +5,7 @@ import { logger } from '../config/logger';
 export class EmailService {
   private static transporter: nodemailer.Transporter;
 
+  // Initialize email service with SMTP configuration
   static initialize() {
     this.transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
@@ -26,6 +27,7 @@ export class EmailService {
     });
   }
 
+  // Generic email sending method
   private static async sendEmail(to: string, subject: string, html: string): Promise<boolean> {
     try {
       const mailOptions = {
@@ -48,6 +50,7 @@ export class EmailService {
     }
   }
 
+  // Send email verification code
   static async sendVerificationCode(
     email: string,
     code: string,
@@ -91,6 +94,7 @@ export class EmailService {
     return this.sendEmail(email, subject, html);
   }
 
+  // Send welcome email after successful verification
   static async sendWelcomeEmail(
     email: string,
     name: string
@@ -132,6 +136,7 @@ export class EmailService {
     return this.sendEmail(email, subject, html);
   }
 
+  // Send password reset code
   static async sendPasswordResetCode(
     email: string,
     code: string,
@@ -175,6 +180,7 @@ export class EmailService {
     return this.sendEmail(email, subject, html);
   }
 
+  // Send password change confirmation
   static async sendPasswordChangedConfirmation(
     email: string,
     name: string

@@ -2,6 +2,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { validationResult, body } from 'express-validator';
 
+// Middleware to validate request data using express-validator results
 export const validateRequest = (req: Request, res: Response, next: NextFunction) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -14,66 +15,69 @@ export const validateRequest = (req: Request, res: Response, next: NextFunction)
   next();
 };
 
+// Validation rules for user registration
 export const registerValidation = [
   body('name')
     .notEmpty()
-    .withMessage('نام الزامی است')
+    .withMessage('Name is required')
     .isLength({ min: 2, max: 50 })
-    .withMessage('نام باید بین ۲ تا ۵۰ کاراکتر باشد')
+    .withMessage('Name must be between 2 and 50 characters')
     .trim(),
 
   body('email')
     .isEmail()
-    .withMessage('ایمیل معتبر نیست')
+    .withMessage('Valid email is required')
     .notEmpty()
-    .withMessage('ایمیل الزامی هست'),
+    .withMessage('Email is required'),
 
   body('password')
     .isLength({ min: 6 })
-    .withMessage('رمز عبور باید حداقل ۶ کاراکتر باشد')
+    .withMessage('Password must be at least 6 characters')
     .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-    .withMessage('رمز عبور باید شامل حروف بزرگ، کوچک و اعداد باشد'),
+    .withMessage('Password must contain uppercase, lowercase letters and numbers'),
   body('rememberMe')
     .optional()
     .isBoolean()
-    .withMessage('rememberMe باید boolean باشد')
+    .withMessage('rememberMe must be boolean')
 ];
 
+// Validation rules for user login
 export const loginValidation = [
   body('email')
     .isEmail()
-    .withMessage('ایمیل معتبر نیست'),
+    .withMessage('Valid email is required'),
 
   body('password')
     .notEmpty()
-    .withMessage('رمز عبور الزامی است')
+    .withMessage('Password is required')
 ];
 
+// Validation rules for task creation/updating
 export const taskValidation = [
   body('title')
     .notEmpty()
-    .withMessage('عنوان تسک الزامی است')
+    .withMessage('Task title is required')
     .isLength({ min: 1, max: 100 })
-    .withMessage('عنوان باید بین ۱ تا ۱۰۰ کاراکتر باشد')
+    .withMessage('Title must be between 1 and 100 characters')
     .trim(),
 
   body('description')
     .optional()
     .isLength({ max: 500 })
-    .withMessage('توضیحات نمی‌تواند بیشتر از ۵۰۰ کاراکتر باشد')
+    .withMessage('Description cannot exceed 500 characters')
     .trim(),
 
   body('priority')
     .optional()
     .isIn(['low', 'medium', 'high'])
-    .withMessage('اولویت باید low, medium یا high باشد'),
+    .withMessage('Priority must be low, medium or high'),
 
   body('dueDate')
     .optional()
     .isISO8601()
-    .withMessage('تاریخ باید معتبر باشد'),
+    .withMessage('Due date must be valid'),
   body('rememberMe')
     .optional()
     .isBoolean()
-    .withMessage('rememberMe باید boolean باشد')
+    .withMessage('rememberMe must be boolean')
 ];

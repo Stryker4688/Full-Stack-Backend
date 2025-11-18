@@ -1,6 +1,7 @@
 // backend/src/models/product.ts - FIXED
 import mongoose from 'mongoose';
 
+// Product interface defining the Product document structure
 export interface IProduct extends mongoose.Document {
     _id: mongoose.Types.ObjectId;
     name: string;
@@ -23,6 +24,7 @@ export interface IProduct extends mongoose.Document {
     searchKeywords: string[];
 }
 
+// Product schema definition
 const productSchema = new mongoose.Schema({
     name: {
         type: String,
@@ -102,7 +104,7 @@ const productSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Define ALL indexes
+// Define ALL indexes for optimal query performance
 productSchema.index({
     name: 'text',
     description: 'text',
@@ -120,7 +122,7 @@ productSchema.index({ 'searchKeywords': 1 });
 productSchema.index({ inStock: 1 });
 productSchema.index({ createdBy: 1 });
 
-// Virtual for discount percentage
+// Virtual for calculating discount percentage
 productSchema.virtual('discountPercentage').get(function () {
     if (this.originalPrice && this.originalPrice > this.price) {
         return Math.round(((this.originalPrice - this.price) / this.originalPrice) * 100);
@@ -128,11 +130,11 @@ productSchema.virtual('discountPercentage').get(function () {
     return 0;
 });
 
-// Middleware for auto-generating search keywords
+// Middleware for auto-generating search keywords before saving
 productSchema.pre('save', function (next) {
     this.inStock = this.stockQuantity > 0;
 
-    // Generate search keywords
+    // Generate search keywords from product data
     const keywords = new Set<string>();
 
     this.name.toLowerCase().split(' ').forEach(word => {
@@ -162,6 +164,7 @@ productSchema.pre('save', function (next) {
     next();
 });
 
+// Remove version key when converting to JSON
 productSchema.set('toJSON', {
     virtuals: true,
     transform: function (doc, ret) {

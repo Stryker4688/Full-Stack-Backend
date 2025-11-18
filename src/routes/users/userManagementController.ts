@@ -1,4 +1,4 @@
-// backend/src/controllers/userManagementController.ts - Optimized with Redis
+// backend/src/controllers/userManagementController.ts - Fixed version
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import User from '../../models/users';
@@ -7,6 +7,7 @@ import { logger } from '../../config/logger';
 import jwt from 'jsonwebtoken';
 import { cacheWithFallback, generateKey, CACHE_TTL, clearUserCache, cacheDeletePattern } from '../../utils/cacheUtils';
 
+// Get all users with pagination and filtering
 export const getAllUsers = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -42,7 +43,7 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
                     searchFilter.isActive = isActive === 'true';
                 }
 
-                // Exclude current user
+                // Exclude current user from results
                 searchFilter._id = { $ne: req.userId };
 
                 const users = await User.find(searchFilter)
@@ -76,17 +77,18 @@ export const getAllUsers = async (req: AuthRequest, res: Response) => {
 
         res.json(responseData);
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('getAllUsers', error, {
             userId: req.userId
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت لیست کاربران'
+            message: 'Error retrieving user list'
         });
     }
 };
 
+// Get user by ID
 export const getUserById = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -101,7 +103,7 @@ export const getUserById = async (req: AuthRequest, res: Response) => {
         if (!user) {
             return res.status(404).json({
                 success: false,
-                message: 'کاربر یافت نشد'
+                message: 'User not found'
             });
         }
 
@@ -114,18 +116,19 @@ export const getUserById = async (req: AuthRequest, res: Response) => {
             user
         });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('getUserById', error, {
             userId: req.userId,
             targetUserId: req.params.id
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت اطلاعات کاربر'
+            message: 'Error retrieving user information'
         });
     }
 };
 
+// Admin login as user (impersonation)
 export const loginAsUser = async (req: AuthRequest, res: Response) => {
     try {
         const { userId } = req.body;
@@ -133,41 +136,38 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
         if (!userId) {
             return res.status(400).json({
                 success: false,
-                message: 'آیدی کاربر الزامی است'
+                message: 'User ID is required'
             });
         }
 
-        // Find target user with cache
-        const targetUser = await cacheWithFallback(
-            generateKey.userProfile(userId),
-            async () => await User.findById(userId),
-            CACHE_TTL.SHORT
-        );
+        // Find target user - without cache for security
+        const targetUser = await User.findById(userId)
+            .select('-password -emailVerificationCode -emailVerificationCodeExpires');
 
         if (!targetUser) {
             return res.status(404).json({
                 success: false,
-                message: 'کاربر یافت نشد'
+                message: 'User not found'
             });
         }
 
         if (!targetUser.isActive) {
             return res.status(400).json({
                 success: false,
-                message: 'این کاربر غیرفعال است'
+                message: 'This user account is deactivated'
             });
         }
 
-        // Find current admin
+        // Find current admin to verify permissions
         const currentAdmin = await User.findById(req.userId);
         if (!currentAdmin || (currentAdmin.role !== 'admin' && currentAdmin.role !== 'super_admin')) {
             return res.status(403).json({
                 success: false,
-                message: 'فقط ادمین‌ها مجاز به این عمل هستند'
+                message: 'Only admins are authorized for this action'
             });
         }
 
-        // Create token for target user
+        // Create impersonation token for target user
         const token = jwt.sign(
             {
                 userId: targetUser._id.toString(),
@@ -194,7 +194,7 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            message: `ورود به حساب ${targetUser.name} با موفقیت انجام شد`,
+            message: `Logged into ${targetUser.name}'s account successfully`,
             token,
             user: {
                 id: targetUser._id.toString(),
@@ -206,18 +206,19 @@ export const loginAsUser = async (req: AuthRequest, res: Response) => {
             }
         });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('loginAsUser', error, {
             adminId: req.userId,
             targetUserId: req.body.userId
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در ورود به حساب کاربر'
+            message: 'Error logging into user account'
         });
     }
 };
 
+// Update user active status
 export const updateUserStatus = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -227,7 +228,7 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
         if (id === req.userId) {
             return res.status(400).json({
                 success: false,
-                message: 'نمی‌توانید وضعیت خودتان را تغییر دهید'
+                message: 'You cannot change your own status'
             });
         }
 
@@ -240,13 +241,14 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
         if (!user) {
             return res.status(404).json({
                 success: false,
-                message: 'کاربر یافت نشد'
+                message: 'User not found'
             });
         }
 
         // Clear user cache and user list caches
         await clearUserCache(id);
         await cacheDeletePattern('users:list:*');
+        await cacheDeletePattern('users:stats*');
 
         LoggerService.userLog(req.userId!, 'update_user_status', {
             targetUserId: id,
@@ -255,22 +257,23 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
 
         res.json({
             success: true,
-            message: `وضعیت کاربر ${isActive ? 'فعال' : 'غیرفعال'} شد`,
+            message: `User ${isActive ? 'activated' : 'deactivated'}`,
             user
         });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('updateUserStatus', error, {
             adminId: req.userId,
             targetUserId: req.params.id
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در تغییر وضعیت کاربر'
+            message: 'Error changing user status'
         });
     }
 };
 
+// Get user statistics for dashboard
 export const getUserStats = async (req: AuthRequest, res: Response) => {
     try {
         const cacheKey = generateKey.userStats();
@@ -316,13 +319,13 @@ export const getUserStats = async (req: AuthRequest, res: Response) => {
             stats
         });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('getUserStats', error, {
             userId: req.userId
         });
         res.status(500).json({
             success: false,
-            message: 'خطا در دریافت آمار کاربران'
+            message: 'Error retrieving user statistics'
         });
     }
 };

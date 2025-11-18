@@ -3,16 +3,18 @@ import { logger } from '../config/logger';
 
 export class GoogleAuthService {
 
+    // Initialize Google Auth Service
     static initialize() {
         console.log('✅ Google Auth Service Initialized (TokenInfo API)');
         logger.info('Google Auth Service Initialized');
     }
 
-    // 🆕 متد جدید برای تبدیل authorization code به idToken
+    // New method to convert authorization code to idToken
     static async getTokenFromCode(code: string): Promise<string> {
         try {
             console.log('🔄 Exchanging authorization code for tokens...');
 
+            // Exchange authorization code for tokens via Google OAuth endpoint
             const response = await fetch('https://oauth2.googleapis.com/token', {
                 method: 'POST',
                 headers: {
@@ -51,11 +53,12 @@ export class GoogleAuthService {
         }
     }
 
-    // متد موجود برای verify token
+    // Existing method to verify Google token
     static async verifyToken(idToken: string) {
         try {
             console.log('🔧 Verifying token via Google TokenInfo API...');
 
+            // Verify token using Google's TokenInfo endpoint
             const response = await fetch(
                 `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
             );
@@ -73,7 +76,7 @@ export class GoogleAuthService {
             console.log('👤 User email:', payload.email);
             console.log('🎯 Audience:', payload.aud);
 
-            // بررسی audience
+            // Verify audience matches our client ID
             if (payload.aud !== process.env.GOOGLE_CLIENT_ID) {
                 console.error('❌ Audience mismatch:', {
                     expected: process.env.GOOGLE_CLIENT_ID,
@@ -82,6 +85,7 @@ export class GoogleAuthService {
                 throw new Error('Invalid token audience');
             }
 
+            // Return formatted user data from Google
             return {
                 googleId: payload.sub,
                 email: payload.email,

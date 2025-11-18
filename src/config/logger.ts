@@ -3,14 +3,14 @@ import winston from 'winston';
 import 'winston-daily-rotate-file';
 import path from 'path';
 
-// ایجاد پوشه logs اگر وجود ندارد
+// Create logs directory if it doesn't exist
 const logsDir = path.join(__dirname, '../../logs');
 import fs from 'fs';
 if (!fs.existsSync(logsDir)) {
     fs.mkdirSync(logsDir, { recursive: true });
 }
 
-// تعریف فرمت لاگ‌ها
+// Define log format
 const logFormat = winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
     winston.format.errors({ stack: true }),
@@ -29,7 +29,7 @@ const logFormat = winston.format.combine(
     })
 );
 
-// ایجاد transports مختلف
+// Create different transports
 const transports = {
     console: new winston.transports.Console({
         format: winston.format.combine(
@@ -70,7 +70,7 @@ const transports = {
     })
 };
 
-// ایجاد logger instance
+// Create logger instance
 export const logger = winston.createLogger({
     levels: {
         error: 0,
@@ -99,7 +99,7 @@ export const logger = winston.createLogger({
     ]
 });
 
-// اگر در حالت development هستیم، لاگ‌های debug رو هم به فایل اضافه کن
+// Add debug logs to file in development mode
 if (process.env.NODE_ENV === 'development') {
     logger.add(new winston.transports.File({
         filename: path.join(logsDir, 'debug.log'),

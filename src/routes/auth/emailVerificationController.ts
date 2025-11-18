@@ -1,4 +1,4 @@
-// backend/src/controllers/emailVerificationController.ts - Optimized with Redis
+// backend/src/controllers/emailVerificationController.ts - Fixed version
 import { Response } from 'express';
 import User from '../../models/users';
 import { EmailService } from '../../services/emailService';
@@ -8,6 +8,7 @@ import { AuthRequest } from '../../middlewares/auth';
 import jwt from 'jsonwebtoken';
 import { clearUserCache, cacheWithFallback, generateKey, CACHE_TTL } from '../../utils/cacheUtils';
 
+// Send verification email to authenticated user
 export const sendVerificationEmail = async (req: AuthRequest, res: Response) => {
     try {
         if (!req.user || !req.user.userId) {
@@ -22,12 +23,8 @@ export const sendVerificationEmail = async (req: AuthRequest, res: Response) => 
 
         logger.debug('Sending verification CODE for user', { userId });
 
-        // Get user with cache
-        const user = await cacheWithFallback(
-            generateKey.userProfile(userId),
-            async () => await User.findById(userId),
-            CACHE_TTL.SHORT
-        );
+        // Get user - without cache for verification code security
+        const user = await User.findById(userId);
 
         if (!user) {
             logger.warn('User not found for email verification', { userId });
@@ -47,7 +44,7 @@ export const sendVerificationEmail = async (req: AuthRequest, res: Response) => 
             });
         }
 
-        // Generate 6-digit code
+        // Generate 6-digit verification code
         const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
         const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
@@ -67,7 +64,7 @@ export const sendVerificationEmail = async (req: AuthRequest, res: Response) => 
         // Clear user cache
         await clearUserCache(userId);
 
-        // Send email with code
+        // Send email with verification code
         const emailSent = await EmailService.sendVerificationCode(
             user.email,
             verificationCode,
@@ -112,6 +109,7 @@ export const sendVerificationEmail = async (req: AuthRequest, res: Response) => 
     }
 };
 
+// Verify email with code
 export const verifyEmailCode = async (req: AuthRequest, res: Response) => {
     try {
         const { code, email } = req.body;
@@ -134,7 +132,7 @@ export const verifyEmailCode = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Find user with valid code - no cache for security reasons
+        // Find user with valid code - without cache for security
         const user = await User.findOne({
             email: email.toLowerCase(),
             emailVerificationCode: code,
@@ -142,23 +140,14 @@ export const verifyEmailCode = async (req: AuthRequest, res: Response) => {
         });
 
         if (!user) {
-            const userForDebug = await User.findOne({ email: email.toLowerCase() });
-            logger.warn('Invalid or expired verification code', {
-                email,
-                storedCode: userForDebug?.emailVerificationCode,
-                enteredCode: code,
-                codeMatches: userForDebug?.emailVerificationCode === code,
-                codeExpired: userForDebug?.emailVerificationCodeExpires! < new Date(),
-                hasCode: !!userForDebug?.emailVerificationCode
-            });
-
+            logger.warn('Invalid or expired verification code', { email });
             return res.status(400).json({
                 success: false,
                 message: 'Invalid or expired verification code'
             });
         }
 
-        // Verify email
+        // Verify email and clear verification data
         await User.findByIdAndUpdate(user._id, {
             emailVerified: true,
             emailVerificationCode: undefined,
@@ -168,7 +157,7 @@ export const verifyEmailCode = async (req: AuthRequest, res: Response) => {
         // Clear user cache
         await clearUserCache(user._id.toString());
 
-        // Generate main token
+        // Generate main authentication token
         const token = jwt.sign(
             { userId: user._id.toString() },
             process.env.JWT_SECRET!,
@@ -212,6 +201,7 @@ export const verifyEmailCode = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Resend verification code
 export const resendVerification = async (req: AuthRequest, res: Response) => {
     try {
         const { email } = req.body;
@@ -224,12 +214,8 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Get user with cache
-        const user = await cacheWithFallback(
-            generateKey.userProfile(`email:${email}`),
-            async () => await User.findOne({ email: email.toLowerCase() }),
-            CACHE_TTL.SHORT
-        );
+        // Get user - without cache for security
+        const user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
             logger.warn('Resend verification - user not found', { email });
@@ -247,7 +233,7 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Check rate limiting
+        // Check rate limiting for resend requests
         const lastSent = user.emailVerificationSentAt;
         if (lastSent && Date.now() - lastSent.getTime() < 2 * 60 * 1000) {
             logger.warn('Resend verification - too frequent', {
@@ -260,11 +246,11 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Generate new code
+        // Generate new verification code
         const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
         const codeExpires = new Date(Date.now() + 10 * 60 * 1000);
 
-        // Update user
+        // Update user with new code
         await User.findByIdAndUpdate(user._id, {
             emailVerificationCode: verificationCode,
             emailVerificationCodeExpires: codeExpires,
@@ -274,7 +260,7 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
         // Clear user cache
         await clearUserCache(user._id.toString());
 
-        // Send email
+        // Send email with new code
         const emailSent = await EmailService.sendVerificationCode(
             user.email,
             verificationCode,
@@ -314,4 +300,4 @@ export const resendVerification = async (req: AuthRequest, res: Response) => {
             message: 'Server error'
         });
     }
-};
+};  

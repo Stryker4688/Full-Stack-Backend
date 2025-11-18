@@ -16,7 +16,7 @@ const router = express.Router();
 router.use(authenticateToken);
 router.use(requireAdmin);
 
-// User management
+// User management routes
 router.get('/users', getAllUsers);
 router.get('/users/stats', getUserStats);
 router.get('/users/:id', getUserById);

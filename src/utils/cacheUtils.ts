@@ -1,8 +1,8 @@
-// backend/src/utils/cacheUtils.ts - اصلاح نوع بازگشتی
+// backend/src/utils/cacheUtils.ts - Fixed version
 import { redisClient } from '../config/redis';
 import { logger } from '../config/logger';
 
-// تابع اصلی شما بدون تغییر
+// Main function to clear user cache
 export const clearUserCache = async (userId: string): Promise<void> => {
     try {
         const userKey = `user:profile:${userId}`;
@@ -13,7 +13,7 @@ export const clearUserCache = async (userId: string): Promise<void> => {
     }
 };
 
-// TTL constants
+// Cache TTL constants for different types of data
 export const CACHE_TTL = {
     SHORT: 300, // 5 minutes
     MEDIUM: 1800, // 30 minutes
@@ -24,9 +24,10 @@ export const CACHE_TTL = {
     TESTIMONIALS: 3600 // 1 hour
 };
 
-// Cache key generators
+// Key generators for different cache entities
 export const generateKey = {
     userProfile: (userId: string) => `user:profile:${userId}`,
+    userLogin: (email: string) => `user:login:${email}`, // Changed key for login
     testimonialList: (page: number, limit: number, sort: string) =>
         `testimonials:list:${page}:${limit}:${sort}`,
     testimonialStats: () => 'testimonials:stats',
@@ -94,7 +95,7 @@ export const cacheDeletePattern = async (pattern: string): Promise<number> => {
     }
 };
 
-// Advanced cache operations
+// Advanced cache operations with fallback - Fixed version
 export const cacheWithFallback = async <T>(
     key: string,
     fetchData: () => Promise<T>,
@@ -128,6 +129,40 @@ export const cacheWithFallback = async <T>(
     }
 };
 
+// New function for caching users with password handling
+export const cacheUserWithPassword = async (
+    email: string,
+    fetchData: () => Promise<any>
+): Promise<any> => {
+    const cacheKey = generateKey.userLogin(email);
+
+    try {
+        // Always read from database - for password security
+        const user = await fetchData();
+
+        if (user && user.password) {
+            // Cache user but without password
+            const userWithoutPassword = { ...user.toObject() };
+            delete userWithoutPassword.password;
+            delete userWithoutPassword.emailVerificationCode;
+            delete userWithoutPassword.emailVerificationCodeExpires;
+
+            cacheSet(cacheKey, userWithoutPassword, CACHE_TTL.SHORT).catch(() => { });
+        }
+
+        return user;
+    } catch (error) {
+        logger.error('Cache user with password error', { email, error });
+        return await fetchData();
+    }
+};
+
+// Function to get cached user (without password)
+export const getCachedUser = async (email: string): Promise<any> => {
+    const cacheKey = generateKey.userLogin(email);
+    return await cacheGet(cacheKey);
+};
+
 // Cache invalidation functions
 export const clearProductCache = async (): Promise<void> => {
     try {
@@ -156,7 +191,7 @@ export const clearAdminCache = async (): Promise<void> => {
     }
 };
 
-// 🔽 اصلاح نوع بازگشتی این تابع
+// Health check for cache service
 export const checkCacheHealth = async (): Promise<{ healthy: boolean; latency?: number }> => {
     try {
         const start = Date.now();

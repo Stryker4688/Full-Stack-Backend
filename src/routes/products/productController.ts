@@ -6,16 +6,13 @@ import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import { deleteFile, getFileUrl } from '../../config/multerConfig';
 import {
-    cacheGet,
-    cacheSet,
-    cacheDelete,
     clearProductCache,
     generateKey,
     CACHE_TTL,
     cacheWithFallback
 } from '../../utils/cacheUtils';
 
-// Cache key constants
+// Cache key constants for different product data types
 const CACHE_KEYS = {
     FEATURED: 'featured_products',
     MENU: 'menu_products',
@@ -25,6 +22,7 @@ const CACHE_KEYS = {
     CATEGORIES: 'product_categories'
 };
 
+// Get featured products for home page offers
 export const getFeaturedProducts = async (req: AuthRequest, res: Response) => {
     try {
         const { limit = 8 } = req.query;
@@ -74,6 +72,7 @@ export const getFeaturedProducts = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Get menu products with filtering and pagination
 export const getMenuProducts = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -98,7 +97,7 @@ export const getMenuProducts = async (req: AuthRequest, res: Response) => {
                     inStock: true
                 };
 
-                // Apply filters
+                // Apply filters based on query parameters
                 if (category) filter.category = category;
                 if (roastLevel) filter.roastLevel = roastLevel;
 
@@ -161,6 +160,7 @@ export const getMenuProducts = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Search products with text search and filters
 export const searchProducts = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -189,7 +189,7 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
                     $text: { $search: query as string }
                 };
 
-                // Additional filters
+                // Additional filters for search
                 if (category) searchFilter.category = category;
                 if (roastLevel) searchFilter.roastLevel = roastLevel;
 
@@ -202,7 +202,7 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
 
                 const total = await Product.countDocuments(searchFilter);
 
-                // Get search suggestions
+                // Get search suggestions for better UX
                 const suggestions = await getSearchSuggestions(query as string);
 
                 return {
@@ -240,6 +240,7 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Get product details by ID
 export const getProductById = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -287,6 +288,7 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Create new product (Admin only)
 export const createProduct = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -400,12 +402,13 @@ export const createProduct = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Update existing product
 export const updateProduct = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
         const updateData = { ...req.body };
 
-        // Find existing product
+        // Find existing product - without cache for data consistency
         const existingProduct = await Product.findById(id);
         if (!existingProduct) {
             return res.status(404).json({
@@ -472,10 +475,12 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Delete product (Admin only)
 export const deleteProduct = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
 
+        // Find product - without cache for consistency
         const product = await Product.findById(id);
         if (!product) {
             return res.status(404).json({
@@ -534,6 +539,7 @@ export const deleteProduct = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Delete specific product image
 export const deleteProductImage = async (req: AuthRequest, res: Response) => {
     try {
         const { id, imageUrl } = req.params;
@@ -595,6 +601,7 @@ export const deleteProductImage = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Get products for admin management
 export const getAdminProducts = async (req: AuthRequest, res: Response) => {
     try {
         const {
@@ -669,7 +676,7 @@ export const getAdminProducts = async (req: AuthRequest, res: Response) => {
     }
 };
 
-// Helper functions
+// Helper function to get popular products for menu
 const getPopularProductsForMenu = async (limit: number = 6): Promise<any[]> => {
     try {
         const cacheKey = generateKey.popularProducts(limit);
@@ -699,6 +706,7 @@ const getPopularProductsForMenu = async (limit: number = 6): Promise<any[]> => {
     }
 };
 
+// Helper function to get search suggestions
 const getSearchSuggestions = async (query: string): Promise<string[]> => {
     try {
         const cacheKey = `search_suggestions:${query}`;
@@ -751,6 +759,7 @@ const getSearchSuggestions = async (query: string): Promise<string[]> => {
     }
 };
 
+// Get popular products
 export const getPopularProducts = async (req: AuthRequest, res: Response) => {
     try {
         const { limit = 6 } = req.query;

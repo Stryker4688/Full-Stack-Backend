@@ -1,4 +1,4 @@
-// backend/src/controllers/googleAuthController.ts - Optimized with Redis
+// backend/src/controllers/googleAuthController.ts - Fixed version
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import User from '../../models/users';
@@ -8,8 +8,9 @@ import { logger } from '../../config/logger';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { AuthRequest } from '../../middlewares/auth';
-import { cacheWithFallback, generateKey, CACHE_TTL, clearUserCache } from '../../utils/cacheUtils';
+import { clearUserCache } from '../../utils/cacheUtils';
 
+// Handle Google authentication (both authorization code and direct token flows)
 export const googleAuth = async (req: AuthRequest, res: Response) => {
     try {
         const { code, idToken, rememberMe = false } = req.body;
@@ -33,6 +34,7 @@ export const googleAuth = async (req: AuthRequest, res: Response) => {
         if (code) {
             logger.debug('Processing authorization code flow');
             try {
+                // Exchange authorization code for ID token
                 usedIdToken = await GoogleAuthService.getTokenFromCode(code);
                 googleUser = await GoogleAuthService.verifyToken(usedIdToken);
             } catch (error: any) {
@@ -64,17 +66,13 @@ export const googleAuth = async (req: AuthRequest, res: Response) => {
             flow: code ? 'authorization_code' : 'direct_token'
         });
 
-        // Find existing user with cache
-        let user = await cacheWithFallback(
-            generateKey.userProfile(`google:${googleUser.email}`),
-            async () => await User.findOne({
-                $or: [
-                    { googleId: googleUser.googleId },
-                    { email: googleUser.email.toLowerCase() }
-                ]
-            }),
-            CACHE_TTL.SHORT
-        );
+        // Find existing user by Google ID or email - without cache for security
+        let user = await User.findOne({
+            $or: [
+                { googleId: googleUser.googleId },
+                { email: googleUser.email.toLowerCase() }
+            ]
+        });
 
         let requiresPasswordSetup = false;
         let tempToken = '';
@@ -84,6 +82,7 @@ export const googleAuth = async (req: AuthRequest, res: Response) => {
                 email: googleUser.email
             });
 
+            // Create temporary token for new user password setup
             tempToken = jwt.sign(
                 {
                     googleUser: {
@@ -113,6 +112,7 @@ export const googleAuth = async (req: AuthRequest, res: Response) => {
                 existingProvider: user.authProvider
             });
 
+            // Update user with Google ID if not already set
             if (!user.googleId) {
                 user.googleId = googleUser.googleId;
                 user.authProvider = 'google';
@@ -126,6 +126,7 @@ export const googleAuth = async (req: AuthRequest, res: Response) => {
             // Clear user cache
             await clearUserCache(user._id.toString());
 
+            // Check if password setup is required for existing user
             if (!user.password) {
                 tempToken = jwt.sign(
                     {
@@ -163,6 +164,7 @@ export const googleAuth = async (req: AuthRequest, res: Response) => {
             });
         }
 
+        // Generate main authentication token for successful login
         const expiresIn = rememberMe ? '120d' : '1d';
         const token = jwt.sign(
             { userId: user!._id.toString() },

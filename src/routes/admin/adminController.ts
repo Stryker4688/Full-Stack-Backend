@@ -1,4 +1,4 @@
-// backend/src/controllers/adminController.ts - Optimized with Redis
+// backend/src/controllers/adminController.ts - Fixed version
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import User from '../../models/users';
@@ -8,6 +8,7 @@ import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import { clearUserCache, cacheWithFallback, generateKey, CACHE_TTL, cacheDeletePattern } from '../../utils/cacheUtils';
 
+// Create new admin user (Super Admin only)
 export const createAdmin = async (req: AuthRequest, res: Response) => {
     try {
         const { name, email, password } = req.body;
@@ -17,28 +18,26 @@ export const createAdmin = async (req: AuthRequest, res: Response) => {
             adminEmail: email
         });
 
-        // Check existing user with cache
-        const existingUser = await cacheWithFallback(
-            generateKey.userProfile(`check:${email}`),
-            async () => await User.findOne({ email }),
-            CACHE_TTL.SHORT
-        );
+        // Check existing user - without cache for security
+        const existingUser = await User.findOne({ email: email.toLowerCase() });
 
         if (existingUser) {
-            res.status(400).json({ message: 'کاربر با این ایمیل وجود دارد' });
-            return;
+            return res.status(400).json({
+                success: false,
+                message: 'User with this email already exists'
+            });
         }
 
-        // Hash password
+        // Hash password with pepper
         const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
             .update(password)
             .digest('hex');
         const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-        // Create admin
+        // Create admin user
         const admin = new User({
             name,
-            email,
+            email: email.toLowerCase(),
             password: hashedPassword,
             role: 'admin',
             emailVerified: true
@@ -49,6 +48,7 @@ export const createAdmin = async (req: AuthRequest, res: Response) => {
         // Clear relevant caches
         await cacheDeletePattern('admins:*');
         await cacheDeletePattern('users:list:*');
+        await cacheDeletePattern('users:stats*');
 
         LoggerService.userLog(req.userId!, 'create_admin', {
             adminId: admin._id.toString(),
@@ -61,7 +61,8 @@ export const createAdmin = async (req: AuthRequest, res: Response) => {
         });
 
         res.status(201).json({
-            message: 'ادمین با موفقیت ایجاد شد',
+            success: true,
+            message: 'Admin created successfully',
             admin: {
                 id: admin._id.toString(),
                 name: admin.name,
@@ -72,15 +73,20 @@ export const createAdmin = async (req: AuthRequest, res: Response) => {
             }
         });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('createAdmin', error, {
             superAdminId: req.userId,
             adminData: req.body
         });
-        res.status(500).json({ message: 'خطا در ایجاد ادمین', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error creating admin',
+            error: error.message
+        });
     }
 };
 
+// Get list of all admins
 export const getAdmins = async (req: AuthRequest, res: Response) => {
     try {
         const { page = 1, limit = 10 } = req.query;
@@ -93,7 +99,7 @@ export const getAdmins = async (req: AuthRequest, res: Response) => {
                 const admins = await User.find({
                     role: 'admin'
                 })
-                    .select('-password')
+                    .select('-password -emailVerificationCode -emailVerificationCodeExpires')
                     .sort({ createdAt: -1 })
                     .limit(Number(limit))
                     .skip((Number(page) - 1) * Number(limit));
@@ -117,24 +123,34 @@ export const getAdmins = async (req: AuthRequest, res: Response) => {
             count: result.admins.length
         });
 
-        res.json(result);
+        res.json({
+            success: true,
+            ...result
+        });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('getAdmins', error, {
             superAdminId: req.userId
         });
-        res.status(500).json({ message: 'خطا در دریافت لیست ادمین‌ها', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error retrieving admin list',
+            error: error.message
+        });
     }
 };
 
+// Delete admin user
 export const deleteAdmin = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
 
         // Prevent self-deletion
         if (id === req.userId) {
-            res.status(400).json({ message: 'نمی‌توانید خودتان را حذف کنید' });
-            return;
+            return res.status(400).json({
+                success: false,
+                message: 'You cannot delete yourself'
+            });
         }
 
         const admin = await User.findOneAndDelete({
@@ -143,8 +159,10 @@ export const deleteAdmin = async (req: AuthRequest, res: Response) => {
         });
 
         if (!admin) {
-            res.status(404).json({ message: 'ادمین یافت نشد' });
-            return;
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
         }
 
         // Clear all relevant caches
@@ -163,17 +181,25 @@ export const deleteAdmin = async (req: AuthRequest, res: Response) => {
             adminId: id
         });
 
-        res.json({ message: 'ادمین با موفقیت حذف شد' });
+        res.json({
+            success: true,
+            message: 'Admin deleted successfully'
+        });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('deleteAdmin', error, {
             superAdminId: req.userId,
             adminId: req.params.id
         });
-        res.status(500).json({ message: 'خطا در حذف ادمین', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error deleting admin',
+            error: error.message
+        });
     }
 };
 
+// Toggle admin active status
 export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
@@ -184,8 +210,10 @@ export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
         });
 
         if (!admin) {
-            res.status(404).json({ message: 'ادمین یافت نشد' });
-            return;
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
         }
 
         admin.isActive = !admin.isActive;
@@ -209,7 +237,8 @@ export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
         });
 
         res.json({
-            message: `ادمین ${admin.isActive ? 'فعال' : 'غیرفعال'} شد`,
+            success: true,
+            message: `Admin ${admin.isActive ? 'activated' : 'deactivated'}`,
             admin: {
                 id: admin._id.toString(),
                 name: admin.name,
@@ -218,11 +247,15 @@ export const toggleAdminStatus = async (req: AuthRequest, res: Response) => {
             }
         });
 
-    } catch (error) {
+    } catch (error: any) {
         LoggerService.errorLog('toggleAdminStatus', error, {
             superAdminId: req.userId,
             adminId: req.params.id
         });
-        res.status(500).json({ message: 'خطا در تغییر وضعیت ادمین', error });
+        res.status(500).json({
+            success: false,
+            message: 'Error changing admin status',
+            error: error.message
+        });
     }
 };

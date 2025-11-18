@@ -1,4 +1,4 @@
-// backend/src/controllers/passwordResetController.ts - Optimized with Redis
+// backend/src/controllers/passwordResetController.ts - Fixed version
 import { Response } from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
@@ -8,8 +8,9 @@ import { EmailService } from '../../services/emailService';
 import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import { AuthRequest } from '../../middlewares/auth';
-import { cacheWithFallback, generateKey, CACHE_TTL, clearUserCache } from '../../utils/cacheUtils';
+import { clearUserCache } from '../../utils/cacheUtils';
 
+// Handle forgot password request
 export const forgotPassword = async (req: AuthRequest, res: Response) => {
     try {
         const { email } = req.body;
@@ -24,12 +25,8 @@ export const forgotPassword = async (req: AuthRequest, res: Response) => {
 
         logger.debug('Forgot password request', { email });
 
-        // Find user with cache
-        const user = await cacheWithFallback(
-            generateKey.userProfile(`email:${email}`),
-            async () => await User.findOne({ email: email.toLowerCase() }),
-            CACHE_TTL.SHORT
-        );
+        // Find user - without cache for security
+        const user = await User.findOne({ email: email.toLowerCase() });
 
         // For security, return same message even if user doesn't exist
         if (!user) {
@@ -40,7 +37,7 @@ export const forgotPassword = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Check rate limiting
+        // Check rate limiting for reset requests
         const lastResetRequest = user.emailVerificationSentAt;
         if (lastResetRequest && Date.now() - lastResetRequest.getTime() < 2 * 60 * 1000) {
             logger.warn('Forgot password - too frequent requests', {
@@ -53,10 +50,10 @@ export const forgotPassword = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Generate 6-digit code
+        // Generate 6-digit verification code
         const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
 
-        // Save code to database
+        // Save code to database with expiration
         await User.findByIdAndUpdate(user._id, {
             emailVerificationCode: resetCode,
             emailVerificationCodeExpires: new Date(Date.now() + 10 * 60 * 1000),
@@ -66,7 +63,7 @@ export const forgotPassword = async (req: AuthRequest, res: Response) => {
         // Clear user cache
         await clearUserCache(user._id.toString());
 
-        // Send email with code
+        // Send email with reset code
         const emailSent = await EmailService.sendPasswordResetCode(
             user.email,
             resetCode,
@@ -108,6 +105,7 @@ export const forgotPassword = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Verify password reset code
 export const verifyResetCode = async (req: AuthRequest, res: Response) => {
     try {
         const { code, email } = req.body;
@@ -122,7 +120,7 @@ export const verifyResetCode = async (req: AuthRequest, res: Response) => {
 
         logger.debug('Verify reset code attempt', { email, code });
 
-        // Find user with valid code - no cache for security
+        // Find user with valid code - without cache for security
         const user = await User.findOne({
             email: email.toLowerCase(),
             emailVerificationCode: code,
@@ -177,6 +175,7 @@ export const verifyResetCode = async (req: AuthRequest, res: Response) => {
     }
 };
 
+// Reset password with valid token
 export const resetPassword = async (req: AuthRequest, res: Response) => {
     try {
         const { token, newPassword } = req.body;
@@ -199,7 +198,7 @@ export const resetPassword = async (req: AuthRequest, res: Response) => {
 
         logger.debug('Reset password attempt');
 
-        // Verify token
+        // Verify reset token
         let decoded: any;
         try {
             decoded = jwt.verify(token, process.env.JWT_SECRET!);
@@ -219,7 +218,7 @@ export const resetPassword = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Find user
+        // Find user - without cache for security
         const user = await User.findById(decoded.userId);
 
         if (!user) {
@@ -232,13 +231,13 @@ export const resetPassword = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        // Hash new password
+        // Hash new password with pepper
         const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
             .update(newPassword)
             .digest('hex');
         const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-        // Update user and clear code
+        // Update user and clear verification code
         await User.findByIdAndUpdate(user._id, {
             password: hashedPassword,
             emailVerificationCode: undefined,

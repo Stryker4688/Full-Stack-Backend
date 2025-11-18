@@ -2,26 +2,27 @@
 import { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
 
+// Cloudflare Turnstile CAPTCHA verification middleware
 export const verifyTurnstile = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        // ✅ اگر در حالت توسعه هستیم، skip شود
+        // ✅ Skip in development mode
         if (process.env.NODE_ENV === 'development') {
             logger.debug('Turnstile skipped in development mode');
             return next();
         }
 
-        // 🔥 تغییر این خط - استفاده از نام درست فیلد
+        // 🔥 Change this line - using correct field name
         const turnstileToken = req.body['cf-turnstile-response'] || req.body.turnstileToken;
 
-        // اگر توکن Turnstile وجود ندارد
+        // If Turnstile token is missing
         if (!turnstileToken) {
             logger.warn('Turnstile token missing', { ip: req.ip, endpoint: req.path });
             return res.status(400).json({
-                message: 'لطفاً تأیید کنید که شما ربات نیستید'
+                message: 'Please verify that you are not a robot'
             });
         }
 
-        // بقیه کد بدون تغییر...
+        // Verify token with Cloudflare Turnstile API
         const formData = new FormData();
         formData.append('secret', process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY!);
         formData.append('response', turnstileToken);
@@ -42,7 +43,7 @@ export const verifyTurnstile = async (req: Request, res: Response, next: NextFun
             });
 
             return res.status(400).json({
-                message: 'تأیید امنیتی ناموفق بود. لطفاً دوباره تلاش کنید.'
+                message: 'Security verification failed. Please try again.'
             });
         }
 
@@ -55,7 +56,7 @@ export const verifyTurnstile = async (req: Request, res: Response, next: NextFun
     } catch (error) {
         logger.error('Turnstile verification error', { error, ip: req.ip });
         return res.status(500).json({
-            message: 'خطا در سرویس امنیتی. لطفاً دوباره تلاش کنید.'
+            message: 'Error in security service. Please try again.'
         });
     }
 };

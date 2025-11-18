@@ -4,6 +4,7 @@ import User from '../models/users';
 import { AuthRequest } from './auth';
 import logger from '../config/logger';
 
+// Middleware to require email verification for protected routes
 export const requireEmailVerification = async (
     req: AuthRequest,
     res: Response,
@@ -17,6 +18,7 @@ export const requireEmailVerification = async (
             });
         }
 
+        // Fetch user to check email verification status
         const user = await User.findById(req.user.userId);
         if (!user) {
             return res.status(404).json({

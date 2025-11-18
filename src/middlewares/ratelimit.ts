@@ -5,6 +5,7 @@ import { AuthRequest } from './auth';
 import { logger } from '../config/logger';
 import { RateLimitError } from './errorHandler';
 
+// Rate limit configuration interface
 interface RateLimitConfig {
     windowMs: number;
     maxRequests: number;
@@ -12,57 +13,60 @@ interface RateLimitConfig {
     code?: string;
 }
 
+// Rate limit configurations for different endpoints
 const RATE_LIMIT_CONFIGS: { [key: string]: RateLimitConfig } = {
     '/auth/login': {
         windowMs: 60,
         maxRequests: 5,
-        message: 'تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً 1 دقیقه صبر کنید.',
+        message: 'Too many login attempts. Please wait 1 minute.',
         code: 'LOGIN_RATE_LIMIT'
     },
     '/auth/register': {
         windowMs: 60,
         maxRequests: 3,
-        message: 'تعداد ثبت‌نام‌ها بیش از حد مجاز است. لطفاً 1 دقیقه صبر کنید.',
+        message: 'Too many registration attempts. Please wait 1 minute.',
         code: 'REGISTER_RATE_LIMIT'
     },
     '/auth/verify-email': {
         windowMs: 300,
         maxRequests: 3,
-        message: 'تعداد درخواست‌های تأیید ایمیل بیش از حد مجاز است. لطفاً 5 دقیقه صبر کنید.',
+        message: 'Too many email verification requests. Please wait 5 minutes.',
         code: 'EMAIL_VERIFICATION_LIMIT'
     },
     '/auth/resend-verification': {
         windowMs: 300,
         maxRequests: 2,
-        message: 'تعداد درخواست‌های ارسال مجدد کد بیش از حد مجاز است. لطفاً 5 دقیقه صبر کنید.',
+        message: 'Too many resend verification requests. Please wait 5 minutes.',
         code: 'RESEND_VERIFICATION_LIMIT'
     },
     '/auth/google': {
         windowMs: 60,
         maxRequests: 5,
-        message: 'تعداد درخواست‌های ورود با گوگل بیش از حد مجاز است.',
+        message: 'Too many Google authentication requests.',
         code: 'GOOGLE_AUTH_LIMIT'
     },
     'default': {
         windowMs: 60,
         maxRequests: 10,
-        message: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً 1 دقیقه صبر کنید.',
+        message: 'Too many requests. Please wait 1 minute.',
         code: 'RATE_LIMIT_EXCEEDED'
     },
     'authenticated': {
         windowMs: 60,
         maxRequests: 30,
-        message: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً 1 دقیقه صبر کنید.',
+        message: 'Too many requests. Please wait 1 minute.',
         code: 'AUTHENTICATED_RATE_LIMIT'
     }
 };
 
+// Helper function to safely convert values to numbers
 const safeNumber = (value: any): number => {
     if (typeof value === 'number') return value;
     if (typeof value === 'string') return parseInt(value, 10) || 0;
     return 0;
 };
 
+// Main rate limiting middleware
 export const rateLimit = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
         const ip = req.ip || req.connection.remoteAddress || 'unknown';
@@ -73,7 +77,7 @@ export const rateLimit = async (req: AuthRequest, res: Response, next: NextFunct
                 forwarded: req.headers['x-forwarded-for'],
                 connection: req.connection.remoteAddress
             });
-            throw new RateLimitError('آی‌پی آدرس معتبر یافت نشد.');
+            throw new RateLimitError('No valid IP address found.');
         }
 
         const path = req.path;
@@ -81,6 +85,7 @@ export const rateLimit = async (req: AuthRequest, res: Response, next: NextFunct
 
         let configKey = 'default';
 
+        // Find appropriate rate limit configuration for the current path
         for (const [key, config] of Object.entries(RATE_LIMIT_CONFIGS)) {
             if (path.includes(key) && key !== 'default' && key !== 'authenticated') {
                 configKey = key;
@@ -118,6 +123,7 @@ export const rateLimit = async (req: AuthRequest, res: Response, next: NextFunct
         const remaining = Math.max(0, config.maxRequests - current);
         const resetTime = Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : config.windowMs);
 
+        // Set rate limit headers for client information
         res.setHeader('X-RateLimit-Limit', config.maxRequests.toString());
         res.setHeader('X-RateLimit-Remaining', remaining.toString());
         res.setHeader('X-RateLimit-Reset', resetTime.toString());
@@ -165,11 +171,12 @@ export const rateLimit = async (req: AuthRequest, res: Response, next: NextFunct
     }
 };
 
+// Strict rate limiting for sensitive operations
 export const strictRateLimit = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const strictConfig: RateLimitConfig = {
         windowMs: 300,
         maxRequests: 2,
-        message: 'برای امنیت حساب کاربری، این عمل به طور موقت محدود شده است. لطفاً 5 دقیقه دیگر تلاش کنید.',
+        message: 'For account security, this action is temporarily limited. Please try again in 5 minutes.',
         code: 'STRICT_RATE_LIMIT'
     };
 
@@ -226,6 +233,7 @@ export const strictRateLimit = async (req: AuthRequest, res: Response, next: Nex
     }
 };
 
+// Reset rate limits for a specific identifier
 export const resetRateLimit = async (identifier: string, path: string = ''): Promise<boolean> => {
     try {
         const pattern = path
@@ -246,6 +254,7 @@ export const resetRateLimit = async (identifier: string, path: string = ''): Pro
     }
 };
 
+// Check current rate limit status
 export const rateLimitStatus = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
         const ip = req.ip || req.connection.remoteAddress || 'unknown';
@@ -259,6 +268,7 @@ export const rateLimitStatus = async (req: AuthRequest, res: Response, next: Nex
             path
         };
 
+        // Check rate limit status for each configuration
         for (const [configKey, config] of Object.entries(RATE_LIMIT_CONFIGS)) {
             if (configKey === 'default' || configKey === 'authenticated') continue;
 

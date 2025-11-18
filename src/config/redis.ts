@@ -1,14 +1,15 @@
-// backend/src/config/redis.ts - اصلاح نوع بازگشتی
+// backend/src/config/redis.ts - Final fixed version
 import { createClient } from 'redis';
 import { logger } from './logger';
 
+// Create Redis client with configuration
 const redisClient = createClient({
     socket: {
         host: process.env.REDIS_HOST || 'localhost',
         port: parseInt(process.env.REDIS_PORT || '6379'),
         reconnectStrategy: (retries) => {
             if (retries > 10) {
-                console.log('❌ Too many reconnection attempts to Redis');
+                logger.error('Too many reconnection attempts to Redis');
                 return new Error('Too many reconnects');
             }
             return Math.min(retries * 100, 3000);
@@ -19,7 +20,7 @@ const redisClient = createClient({
     pingInterval: 30000
 });
 
-// Event handlers
+// Enhanced event handlers for Redis client
 redisClient.on('error', (err) => {
     logger.error('❌ Redis Client Error:', err);
 });
@@ -40,6 +41,7 @@ redisClient.on('end', () => {
     logger.warn('🔴 Redis connection closed');
 });
 
+// Connect to Redis with retry logic
 const connectRedis = async (maxRetries = 5): Promise<void> => {
     let retries = 0;
 
@@ -48,13 +50,14 @@ const connectRedis = async (maxRetries = 5): Promise<void> => {
             await redisClient.connect();
             logger.info('🎯 Redis connected successfully');
             return;
-        } catch (error) {
+        } catch (error: any) {
             retries++;
-            logger.error(`❌ Redis connection failed (attempt ${retries}/${maxRetries}):`, error);
+            logger.error(`❌ Redis connection failed (attempt ${retries}/${maxRetries}):`, error.message);
 
             if (retries === maxRetries) {
                 logger.error('💥 Failed to connect to Redis after maximum retries');
-                process.exit(1);
+                // Don't exit process, just log error
+                break;
             }
 
             await new Promise(resolve => setTimeout(resolve, 2000 * retries));
@@ -62,7 +65,7 @@ const connectRedis = async (maxRetries = 5): Promise<void> => {
     }
 };
 
-// 🔽 اصلاح نوع بازگشتی این تابع
+// Check Redis health and latency
 const checkRedisHealth = async (): Promise<{ healthy: boolean; latency?: number }> => {
     try {
         const start = Date.now();
@@ -73,18 +76,19 @@ const checkRedisHealth = async (): Promise<{ healthy: boolean; latency?: number 
             healthy: true,
             latency
         };
-    } catch (error) {
-        logger.error('❌ Redis health check failed:', error);
+    } catch (error: any) {
+        logger.error('❌ Redis health check failed:', error.message);
         return { healthy: false };
     }
 };
 
+// Gracefully disconnect from Redis
 const disconnectRedis = async (): Promise<void> => {
     try {
         await redisClient.quit();
         logger.info('🔴 Redis disconnected gracefully');
-    } catch (error) {
-        logger.error('❌ Error disconnecting Redis:', error);
+    } catch (error: any) {
+        logger.error('❌ Error disconnecting Redis:', error.message);
     }
 };
 

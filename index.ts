@@ -1,23 +1,23 @@
-// backend/src/index.ts - بدون تغییر در import اسکریپت‌ها
+// backend/src/index.ts - No changes to script imports
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import helmet from 'helmet';
 import path from 'path';
-import routes from './src/index'; // مسیر مطابق base code شما
+import routes from './src/index';
 import { connectRedis } from './src/config/redis';
 import { requestLogger, errorLogger } from './src/middlewares/requestlogger';
 import { logger } from './src/config/logger';
 import { GoogleAuthService } from './src/services/googleAuthService';
 import { EmailService } from './src/services/emailService';
-import { createSuperAdmin, checkSuperAdmin } from './src/scripts/createSuperAdmin'; // import دقیقاً مطابق base code
+import { createSuperAdmin, checkSuperAdmin } from './src/scripts/createSuperAdmin';
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-// Middleware - بدون تغییر
+// Middleware - unchanged
 app.use(helmet());
 app.use(cors({
     origin: 'http://localhost:3000',
@@ -27,27 +27,27 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 🆕 سرویس فایل‌های استاتیک برای عکس‌های آپلود شده
+//  Static file service for uploaded images
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// لاگینگ درخواست‌ها
+// Request logging
 app.use(requestLogger);
 
-// Routes - بدون تغییر
+// Routes - unchanged
 app.use(routes);
 
-// لاگینگ خطاها
+// Error logging
 app.use(errorLogger);
 
-// initialize services - بدون تغییر  
+// Initialize services - unchanged  
 GoogleAuthService.initialize();
 EmailService.initialize();
 
-// Connect to database and start server - بدون تغییر در فراخوانی
+// Connect to database and start server - unchanged in calling
 mongoose.connect(process.env.DATABASE_URL!).then(() => {
     logger.info('Connected to MongoDB successfully');
 
-    // فراخوانی دقیقاً مطابق base code شما
+    // Call exactly as per your base code
     createSuperAdmin();
     checkSuperAdmin();
 
@@ -61,14 +61,14 @@ mongoose.connect(process.env.DATABASE_URL!).then(() => {
     process.exit(1);
 });
 
-// redis connecting - بدون تغییر
+// Redis connecting - unchanged
 connectRedis().then(() => {
     logger.info('Redis initialization completed');
 }).catch((error) => {
     logger.error('Redis initialization failed', { error: error.message });
 });
 
-// اضافه کردن graceful shutdown - بدون تغییر
+// Add graceful shutdown - unchanged
 process.on('SIGINT', async () => {
     logger.info('🛑 Received SIGINT, shutting down gracefully...');
     process.exit(0);

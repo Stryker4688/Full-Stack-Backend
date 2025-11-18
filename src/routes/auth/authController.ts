@@ -8,41 +8,40 @@ import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import { AuthRequest } from '../../middlewares/auth';
 import { EmailService } from '../../services/emailService';
-import { cacheWithFallback, generateKey, CACHE_TTL, clearUserCache } from '../../utils/cacheUtils';
+import { cacheWithFallback, generateKey, CACHE_TTL, clearUserCache, cacheUserWithPassword } from '../../utils/cacheUtils';
 
+// Handle user registration
 export const register = async (req: AuthRequest, res: Response) => {
   try {
     const { name, email, password, rememberMe } = req.body;
 
     logger.debug('Registration attempt', { email, name, rememberMe });
 
-    // Check if user exists with cache
-    const existingUser = await cacheWithFallback(
-      generateKey.userProfile(`check:${email}`),
-      async () => await User.findOne({ email }),
-      CACHE_TTL.SHORT
-    );
+    // Check if user exists - without cache for security
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
 
     if (existingUser) {
       LoggerService.authLog('unknown', 'registration_failed', { reason: 'user_exists', email });
-      res.status(400).json({ message: 'User already exists' });
-      return;
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists'
+      });
     }
 
-    // Hash password
+    // Hash password with pepper for additional security
     const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
       .update(password)
       .digest('hex');
     const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-    // Generate verification code
+    // Generate email verification code
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
     const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Create user with emailVerified: false
     const user = new User({
       name,
-      email,
+      email: email.toLowerCase(),
       password: hashedPassword,
       emailVerified: false,
       emailVerificationCode: verificationCode,
@@ -65,11 +64,12 @@ export const register = async (req: AuthRequest, res: Response) => {
     if (!emailSent) {
       await User.findByIdAndDelete(user._id);
       return res.status(500).json({
+        success: false,
         message: 'Failed to send verification email. Please try again.'
       });
     }
 
-    // Generate temporary token
+    // Generate temporary token for email verification flow
     const tempToken = jwt.sign(
       {
         userId: user._id.toString(),
@@ -90,6 +90,7 @@ export const register = async (req: AuthRequest, res: Response) => {
     });
 
     res.status(201).json({
+      success: true,
       message: 'Registration successful. Please verify your email.',
       tempToken,
       user: {
@@ -99,33 +100,69 @@ export const register = async (req: AuthRequest, res: Response) => {
         emailVerified: false
       }
     });
-  } catch (error) {
-    logger.error('Registration error', { error, email: req.body.email });
-    res.status(500).json({ message: 'Server error', error });
+  } catch (error: any) {
+    logger.error('Registration error', {
+      error: error.message,
+      stack: error.stack,
+      email: req.body.email
+    });
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
   }
 };
 
+// Handle user login
 export const login = async (req: AuthRequest, res: Response) => {
   try {
     const { email, password, rememberMe } = req.body;
 
     logger.debug('Login attempt', { email, rememberMe });
 
-    // Find user with cache
-    const user = await cacheWithFallback(
-      generateKey.userProfile(`login:${email}`),
-      async () => await User.findOne({ email }),
-      CACHE_TTL.SHORT
+    // Validate input fields
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    // Find user - always read from database for password security
+    const user = await cacheUserWithPassword(
+      email.toLowerCase(),
+      async () => await User.findOne({ email: email.toLowerCase() })
     );
 
     if (!user) {
       LoggerService.authLog('unknown', 'login_failed', { reason: 'user_not_found', email });
       logger.warn('Login failed - user not found', { email });
-      res.status(400).json({ message: 'Invalid credentials' });
-      return;
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
     }
 
-    // Check email verification
+    // Check if user is active
+    if (!user.isActive) {
+      LoggerService.authLog(user._id.toString(), 'login_failed', { reason: 'account_deactivated' });
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been deactivated. Please contact support.'
+      });
+    }
+
+    // Check if user has password (for Google users)
+    if (!user.password) {
+      LoggerService.authLog(user._id.toString(), 'login_failed', { reason: 'no_password_set' });
+      return res.status(400).json({
+        success: false,
+        message: 'Please use Google login or reset your password'
+      });
+    }
+
+    // Check email verification status
     if (!user.emailVerified) {
       LoggerService.authLog(user._id.toString(), 'login_failed', {
         reason: 'email_not_verified'
@@ -147,12 +184,13 @@ export const login = async (req: AuthRequest, res: Response) => {
       await EmailService.sendVerificationCode(user.email, verificationCode, user.name);
 
       return res.status(403).json({
+        success: false,
         message: 'email-not-verified',
         email: user.email
       });
     }
 
-    // Check password
+    // Verify password - now user.password definitely exists
     const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
       .update(password)
       .digest('hex');
@@ -161,8 +199,10 @@ export const login = async (req: AuthRequest, res: Response) => {
     if (!isPasswordValid) {
       LoggerService.authLog(user._id.toString(), 'login_failed', { reason: 'invalid_password' });
       logger.warn('Login failed - invalid password', { userId: user._id.toString(), email });
-      res.status(400).json({ message: 'invalid-password' });
-      return;
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
     }
 
     // Generate main token only if email is verified
@@ -173,11 +213,11 @@ export const login = async (req: AuthRequest, res: Response) => {
       { expiresIn }
     );
 
-    // Update lastLogin
+    // Update last login timestamp
     user.lastLogin = new Date();
     await user.save();
 
-    // Clear and update user cache
+    // Clear user cache
     await clearUserCache(user._id.toString());
 
     LoggerService.authLog(user._id.toString(), 'login_success', { rememberMe });
@@ -188,6 +228,7 @@ export const login = async (req: AuthRequest, res: Response) => {
     });
 
     res.json({
+      success: true,
       message: 'Login successful',
       token,
       expiresIn,
@@ -195,23 +236,32 @@ export const login = async (req: AuthRequest, res: Response) => {
         id: user._id.toString(),
         name: user.name,
         email: user.email,
-        emailVerified: user.emailVerified
+        emailVerified: user.emailVerified,
+        role: user.role,
+        authProvider: user.authProvider
       }
     });
-  } catch (error) {
-    logger.error('Login error', { error, email: req.body.email });
-    res.status(500).json({ message: 'Server error', error });
+
+  } catch (error: any) {
+    logger.error('Login error', {
+      error: error.message,
+      stack: error.stack,
+      email: req.body.email
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error during login'
+    });
   }
 };
 
+// Verify user from token
 export const verifyUser = async (req: AuthRequest, res: Response) => {
   try {
-    // Get user with cache
-    const user = await cacheWithFallback(
-      generateKey.userProfile(req.userId!),
-      async () => await User.findById(req.userId).select('-password -emailVerificationCode -emailVerificationCodeExpires'),
-      CACHE_TTL.USER_PROFILE
-    );
+    // Get user - without cache for user data security
+    const user = await User.findById(req.userId)
+      .select('-password -emailVerificationCode -emailVerificationCodeExpires');
 
     if (!user) {
       LoggerService.authLog(req.userId!, 'verify_user_failed', { reason: 'user_not_found' });
@@ -239,7 +289,7 @@ export const verifyUser = async (req: AuthRequest, res: Response) => {
         createdAt: user.createdAt
       }
     });
-  } catch (error) {
+  } catch (error: any) {
     logger.error('Verify user error:', error);
     res.status(500).json({
       success: false,
@@ -248,6 +298,7 @@ export const verifyUser = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// Check token validity
 export const checkToken = async (req: AuthRequest, res: Response) => {
   try {
     const authHeader = req.headers['authorization'];
@@ -277,4 +328,4 @@ export const checkToken = async (req: AuthRequest, res: Response) => {
     logger.error('Token check error:', error);
     res.status(500).json({ valid: false, message: 'Server error' });
   }
-};
+};  

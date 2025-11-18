@@ -1,4 +1,4 @@
-// backend/src/controllers/googlePasswordController.ts - Optimized with Redis
+// backend/src/controllers/googlePasswordController.ts - Fixed version
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import User from '../../models/users';
@@ -6,8 +6,9 @@ import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { clearUserCache, cacheDeletePattern } from '../../utils/cacheUtils';
+import { clearUserCache } from '../../utils/cacheUtils';
 
+// Setup password for Google users (new or existing)
 export const setupGooglePassword = async (req: Request, res: Response) => {
     try {
         const { tempToken, password } = req.body;
@@ -53,6 +54,7 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
         if (decoded.googleUser) {
             const { googleUser } = decoded;
 
+            // Check if user already exists - without cache for security
             const existingUser = await User.findOne({
                 email: googleUser.email
             });
@@ -65,14 +67,16 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
                 });
             }
 
+            // Hash password for new Google user
             const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
                 .update(password)
                 .digest('hex');
             const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
+            // Create new user with Google data
             user = new User({
                 googleId: googleUser.googleId,
-                email: googleUser.email,
+                email: googleUser.email.toLowerCase(),
                 name: googleUser.name,
                 avatar: googleUser.picture,
                 authProvider: 'google',
@@ -95,6 +99,7 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             });
 
         } else if (decoded.userId) {
+            // Find existing user - without cache for security
             user = await User.findById(decoded.userId);
 
             if (!user) {
@@ -105,6 +110,7 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
                 });
             }
 
+            // Hash password for existing Google user
             const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
                 .update(password)
                 .digest('hex');
@@ -134,6 +140,7 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
         // Clear user cache
         await clearUserCache(user._id.toString());
 
+        // Generate main authentication token
         const token = jwt.sign(
             { userId: user._id.toString() },
             process.env.JWT_SECRET!,

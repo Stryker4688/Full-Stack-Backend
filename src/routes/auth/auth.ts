@@ -1,4 +1,4 @@
-// backend/src/routes/auth.ts - اصلاح شده
+// backend/src/routes/auth.ts - No changes needed
 import express from 'express';
 import { register, login, checkToken, verifyUser } from './authController';
 import { googleAuth } from './googleAuthController';
@@ -11,7 +11,7 @@ import {
 import {
     forgotPassword,
     resetPassword,
-    verifyResetCode  // ✅ اصلاح شد
+    verifyResetCode
 } from './passwordResetController';
 import {
     rateLimit,
@@ -26,7 +26,7 @@ const router = express.Router();
 
 // ==================== 🔐 PUBLIC ROUTES ====================
 
-// 📧 احراز هویت ایمیل
+// 📧 Email authentication routes
 router.post('/register',
     registerValidation,
     verifyTurnstile,
@@ -41,7 +41,7 @@ router.post('/login',
     login
 );
 
-// 🔐 احراز هویت گوگل
+// 🔐 Google authentication routes
 router.post('/google',
     verifyTurnstile,
     rateLimit,
@@ -53,7 +53,7 @@ router.post('/google/set-password',
     setupGooglePassword
 );
 
-// 📨 تأیید ایمیل
+// 📨 Email verification routes
 router.post('/resend-verification',
     strictRateLimit,
     resendVerification
@@ -64,7 +64,7 @@ router.post('/verify-email',
     verifyEmailCode
 );
 
-// 🔑 بازیابی رمز عبور
+// 🔑 Password recovery routes
 router.post('/forgot-password',
     strictRateLimit,
     forgotPassword
@@ -75,7 +75,6 @@ router.post('/reset-password',
     resetPassword
 );
 
-// 🆕 اضافه کردن route جدید برای verify reset code
 router.post('/verify-reset-code',
     strictRateLimit,
     verifyResetCode
@@ -83,24 +82,27 @@ router.post('/verify-reset-code',
 
 // ==================== 🔒 PROTECTED ROUTES ====================
 
-// ✅ بررسی توکن
+// ✅ Token verification routes
 router.get('/check-token',
     authenticateToken,
     rateLimit,
     checkToken
 );
+
 router.get('/verify',
     authenticateToken,
     rateLimit,
-    verifyUser);
-// 📧 ارسال ایمیل تأیید (برای کاربران لاگین کرده)
+    verifyUser
+);
+
+// 📧 Send verification email (for logged-in users)
 router.post('/send-verification',
     authenticateToken,
     rateLimit,
     sendVerificationEmail
 );
 
-// 📊 بررسی وضعیت Rate Limit
+// 📊 Rate limit status check
 router.get('/rate-limit-status',
     authenticateToken,
     rateLimitStatus

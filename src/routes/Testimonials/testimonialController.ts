@@ -1,4 +1,4 @@
-// backend/src/controllers/testimonialController.ts - Optimized with Redis
+// backend/src/controllers/testimonialController.ts - Fixed version
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import Testimonial from '../../models/Testimonials';
@@ -32,7 +32,7 @@ export const createTestimonial = async (req: AuthRequest, res: Response) => {
         // Create new testimonial
         const testimonial = new Testimonial({
             name,
-            email,
+            email: email.toLowerCase(),
             message,
             rating: parseInt(rating),
             isApproved: false,

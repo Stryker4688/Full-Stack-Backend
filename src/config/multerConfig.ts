@@ -5,26 +5,26 @@ import fs from 'fs';
 import { Request } from 'express';
 import { logger } from './logger';
 
-// ایجاد پوشه uploads اگر وجود ندارد
+// Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, '../../uploads/products');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// پیکربندی storage
+// Configure multer storage
 const storage = multer.diskStorage({
     destination: (req: Request, file: Express.Multer.File, cb) => {
         cb(null, uploadsDir);
     },
     filename: (req: Request, file: Express.Multer.File, cb) => {
-        // ایجاد نام فایل منحصر به فرد
+        // Create unique filename
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         const ext = path.extname(file.originalname);
         cb(null, 'product-' + uniqueSuffix + ext);
     }
 });
 
-// فیلتر فایل‌ها برای فقط تصاویر
+// File filter for images only
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
     const allowedMimes = [
         'image/jpeg',
@@ -37,21 +37,21 @@ const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilt
     if (allowedMimes.includes(file.mimetype)) {
         cb(null, true);
     } else {
-        cb(new Error('فقط فایل‌های تصویری مجاز هستند (JPEG, PNG, WebP, GIF)'));
+        cb(new Error('Only image files are allowed (JPEG, PNG, WebP, GIF)'));
     }
 };
 
-// پیکربندی multer
+// Configure multer
 const upload = multer({
     storage: storage,
     fileFilter: fileFilter,
     limits: {
         fileSize: 5 * 1024 * 1024, // 5MB
-        files: 5 // حداکثر 5 فایل
+        files: 5 // Maximum 5 files
     }
 });
 
-// تابع برای حذف فایل
+// Function to delete file from server
 export const deleteFile = (filename: string): Promise<void> => {
     return new Promise((resolve, reject) => {
         const filePath = path.join(uploadsDir, filename);
@@ -67,7 +67,7 @@ export const deleteFile = (filename: string): Promise<void> => {
     });
 };
 
-// تابع برای گرفتن URL فایل
+// Function to get file URL for client access
 export const getFileUrl = (filename: string): string => {
     return `/uploads/products/${filename}`;
 };

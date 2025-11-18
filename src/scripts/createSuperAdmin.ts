@@ -1,18 +1,19 @@
-// backend/src/scripts/createSuperAdmin.ts - Optimized
+// backend/src/scripts/createSuperAdmin.ts
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import User from '../models/users';
 import { logger } from '../config/logger';
-import { clearUserCache, cacheDeletePattern } from '../utils/cacheUtils';
+import { cacheDeletePattern } from '../utils/cacheUtils';
 
+// Create super admin user if it doesn't exist
 export const createSuperAdmin = async (): Promise<void> => {
     try {
         const superAdminEmail = process.env.SUPER_ADMIN_EMAIL || 'superadmin@coffee-shop.com';
         const superAdminPassword = process.env.SUPER_ADMIN_PASSWORD || 'SuperAdmin123!';
 
-        // Check if super admin already exists
+        // Check if super admin already exists - without cache
         const existingSuperAdmin = await User.findOne({
-            email: superAdminEmail,
+            email: superAdminEmail.toLowerCase(),
             role: 'super_admin'
         });
 
@@ -24,16 +25,16 @@ export const createSuperAdmin = async (): Promise<void> => {
             return;
         }
 
-        // Hash password
+        // Hash password with pepper for additional security
         const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
             .update(superAdminPassword)
             .digest('hex');
         const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-        // Create super admin
+        // Create super admin user
         const superAdmin = new User({
             name: 'Super Admin',
-            email: superAdminEmail,
+            email: superAdminEmail.toLowerCase(),
             password: hashedPassword,
             role: 'super_admin',
             emailVerified: true,
@@ -51,17 +52,19 @@ export const createSuperAdmin = async (): Promise<void> => {
             userId: superAdmin._id.toString()
         });
 
+        // Display credentials in console (for initial setup)
         console.log('🎯 Super Admin Credentials:');
         console.log('📧 Email:', superAdminEmail);
         console.log('🔑 Password:', superAdminPassword);
         console.log('⚠️  Remember to change the password after first login!');
 
-    } catch (error) {
-        logger.error('Failed to create super admin', { error });
-        console.error('❌ Error creating super admin:', error);
+    } catch (error: any) {
+        logger.error('Failed to create super admin', { error: error.message });
+        console.error('❌ Error creating super admin:', error.message);
     }
 };
 
+// Check if super admin exists in database
 export const checkSuperAdmin = async (): Promise<void> => {
     try {
         const superAdminCount = await User.countDocuments({ role: 'super_admin' });
@@ -72,7 +75,7 @@ export const checkSuperAdmin = async (): Promise<void> => {
         } else {
             logger.info('Super admin check completed', { count: superAdminCount });
         }
-    } catch (error) {
-        logger.error('Failed to check super admin', { error });
+    } catch (error: any) {
+        logger.error('Failed to check super admin', { error: error.message });
     }
 };

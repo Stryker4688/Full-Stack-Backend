@@ -3,10 +3,11 @@ import { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
 import { AuthRequest } from './auth';
 
+// Request logging middleware
 export const requestLogger = (req: AuthRequest, res: Response, next: NextFunction) => {
     const start = Date.now();
 
-    // لاگ درخواست ورودی - استفاده از info به جای http
+    // Log incoming request - using info instead of http
     logger.info('Incoming Request', {
         method: req.method,
         url: req.url,
@@ -15,7 +16,7 @@ export const requestLogger = (req: AuthRequest, res: Response, next: NextFunctio
         userId: req.userId || 'anonymous'
     });
 
-    // هنگامی که پاسخ ارسال شد
+    // When response is sent
     res.on('finish', () => {
         const duration = Date.now() - start;
         const logLevel = res.statusCode >= 400 ? 'warn' : 'info';
@@ -33,7 +34,7 @@ export const requestLogger = (req: AuthRequest, res: Response, next: NextFunctio
     next();
 };
 
-// middleware برای لاگینگ خطاها
+// Middleware for error logging
 export const errorLogger = (error: any, req: Request, res: Response, next: NextFunction) => {
     logger.error('Unhandled Error', {
         error: error.message,

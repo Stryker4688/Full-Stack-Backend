@@ -1,6 +1,7 @@
 // backend/src/models/users.ts
 import mongoose from 'mongoose';
 
+// User interface defining the User document structure
 export interface IUser extends mongoose.Document {
     _id: mongoose.Types.ObjectId;
     name: string;
@@ -20,6 +21,7 @@ export interface IUser extends mongoose.Document {
     username?: string;
 }
 
+// User schema definition
 const userSchema = new mongoose.Schema({
     name: {
         type: String,
@@ -85,14 +87,14 @@ const userSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Define indexes
+// Define indexes for better query performance
 userSchema.index({ role: 1 });
 userSchema.index({ isActive: 1 });
 userSchema.index({ createdAt: -1 });
 userSchema.index({ authProvider: 1 });
 userSchema.index({ emailVerified: 1 });
 
-// Remove duplicate index definitions
+// Remove sensitive fields when converting to JSON
 userSchema.set('toJSON', {
     virtuals: true,
     transform: function (doc, ret) {

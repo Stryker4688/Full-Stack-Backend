@@ -1,4 +1,4 @@
-// backend/src/index.ts - اصلاح استفاده از نوع
+// backend/src/index.ts - Final fixed version
 import admin from './routes/admin/admin'
 import auth from './routes/auth/auth'
 import userManagement from './routes/users/userManagement'
@@ -20,12 +20,13 @@ import {
 
 const router = express.Router()
 
-// Health check with cache status
+// Health check endpoint with cache status
 router.get('/api/health', async (req, res) => {
     try {
         const cacheHealth = await checkCacheHealth();
 
         res.json({
+            success: true,
             message: 'Server is running!',
             status: 'OK',
             timestamp: new Date().toISOString(),
@@ -34,6 +35,7 @@ router.get('/api/health', async (req, res) => {
         });
     } catch (error) {
         res.status(500).json({
+            success: false,
             message: 'Server error',
             status: 'ERROR'
         });
@@ -51,7 +53,8 @@ router.get('/api/admin/cache/stats',
                 success: true,
                 ...stats
             });
-        } catch (error) {
+        } catch (error: any) {
+            logger.error('Failed to get cache stats', { error: error.message });
             res.status(500).json({
                 success: false,
                 message: 'Failed to get cache stats'
@@ -71,7 +74,8 @@ router.get('/api/admin/cache/health',
                 healthy: health.healthy,
                 latency: health.latency
             });
-        } catch (error) {
+        } catch (error: any) {
+            logger.error('Failed to check cache health', { error: error.message });
             res.status(500).json({
                 success: false,
                 message: 'Failed to check cache health'
@@ -80,7 +84,7 @@ router.get('/api/admin/cache/health',
     }
 );
 
-// بقیه routeها بدون تغییر...
+// Cache clearance routes for different entities
 router.post('/api/admin/cache/clear/products',
     authenticateToken,
     requireAdmin,
@@ -91,7 +95,8 @@ router.post('/api/admin/cache/clear/products',
                 success: true,
                 message: 'Product cache cleared successfully'
             });
-        } catch (error) {
+        } catch (error: any) {
+            logger.error('Failed to clear product cache', { error: error.message });
             res.status(500).json({
                 success: false,
                 message: 'Failed to clear product cache'
@@ -110,7 +115,8 @@ router.post('/api/admin/cache/clear/testimonials',
                 success: true,
                 message: 'Testimonial cache cleared successfully'
             });
-        } catch (error) {
+        } catch (error: any) {
+            logger.error('Failed to clear testimonial cache', { error: error.message });
             res.status(500).json({
                 success: false,
                 message: 'Failed to clear testimonial cache'
@@ -129,7 +135,8 @@ router.post('/api/admin/cache/clear/users',
                 success: true,
                 message: 'User cache cleared successfully'
             });
-        } catch (error) {
+        } catch (error: any) {
+            logger.error('Failed to clear user cache', { error: error.message });
             res.status(500).json({
                 success: false,
                 message: 'Failed to clear user cache'
@@ -138,11 +145,13 @@ router.post('/api/admin/cache/clear/users',
     }
 );
 
+// Clear all caches (Super Admin only)
 router.post('/api/admin/cache/clear/all',
     authenticateToken,
     requireSuperAdmin,
     async (req, res) => {
         try {
+            // Clear all application caches
             await clearProductCache();
             await clearTestimonialCache();
             await clearAdminCache();
@@ -153,7 +162,8 @@ router.post('/api/admin/cache/clear/all',
                 success: true,
                 message: 'All caches cleared successfully'
             });
-        } catch (error) {
+        } catch (error: any) {
+            logger.error('Failed to clear all caches', { error: error.message });
             res.status(500).json({
                 success: false,
                 message: 'Failed to clear all caches'
@@ -175,7 +185,8 @@ router.post('/api/admin/cache/clear/user/:userId',
                 success: true,
                 message: `User cache for ${userId} cleared successfully`
             });
-        } catch (error) {
+        } catch (error: any) {
+            logger.error('Failed to clear user cache', { error: error.message });
             res.status(500).json({
                 success: false,
                 message: 'Failed to clear user cache'
@@ -184,11 +195,19 @@ router.post('/api/admin/cache/clear/user/:userId',
     }
 );
 
-// Main routes
+// Main application routes
 router.use('/api/auth', auth)
 router.use('/api/admin', admin)
 router.use('/api/management', userManagement)
 router.use('/api', testimonialRoutes)
 router.use('/api', productRoutes)
+
+// 404 handler for undefined routes
+router.use('*', (req, res) => {
+    res.status(404).json({
+        success: false,
+        message: `Route ${req.method} ${req.originalUrl} not found`
+    });
+});
 
 export default router

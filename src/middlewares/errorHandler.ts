@@ -5,7 +5,7 @@ import { redisClient } from '../config/redis';
 import { AuthRequest } from './auth';
 import { cacheWithFallback, generateKey, CACHE_TTL } from '../utils/cacheUtils';
 
-// 🎯 انواع خطاهای سفارشی (بدون تغییر)
+// Custom error types for different error scenarios
 export class AppError extends Error {
     public readonly statusCode: number;
     public readonly isOperational: boolean;
@@ -26,6 +26,7 @@ export class AppError extends Error {
     }
 }
 
+// Specific error types for different use cases
 export class AuthError extends AppError {
     constructor(message: string = 'Authentication failed', code?: string) {
         super(message, 401, true, code);
@@ -74,12 +75,12 @@ export class ExternalServiceError extends AppError {
     }
 }
 
-// 🎯 مدیریت خطاها با کش
+// Error management with Redis caching
 class ErrorManager {
-    private static readonly ERROR_TTL = 24 * 60 * 60; // 24 ساعت
+    private static readonly ERROR_TTL = 24 * 60 * 60; // 24 hours
     private static readonly MAX_RECENT_ERRORS = 100;
 
-    // ذخیره خطا در Redis با ساختار بهبود یافته
+    // Store error in Redis with enhanced structure
     static async logErrorToRedis(errorData: any): Promise<void> {
         try {
             const errorId = `error:${Date.now()}:${Math.random().toString(36).substr(2, 9)}`;
@@ -97,22 +98,22 @@ class ErrorManager {
                 JSON.stringify(enhancedErrorData)
             );
 
-            // اضافه کردن به لیست خطاهای اخیر با استفاده از Sorted Set برای مرتب‌سازی
+            // Add to recent errors list using Sorted Set for sorting
             await redisClient.zAdd('recent_errors', {
                 score: Date.now(),
                 value: errorKey
             });
 
-            // حفظ فقط آخرین خطاها
-            await redisClient.zRemRangeByScore('recent_errors', 0, Date.now() - (7 * 24 * 60 * 60 * 1000)); // حذف خطاهای قدیمی‌تر از 7 روز
-            await redisClient.zRemRangeByRank('recent_errors', 0, -this.MAX_RECENT_ERRORS - 1); // حفظ فقط آخرین خطاها
+            // Keep only recent errors
+            await redisClient.zRemRangeByScore('recent_errors', 0, Date.now() - (7 * 24 * 60 * 60 * 1000)); // Remove errors older than 7 days
+            await redisClient.zRemRangeByRank('recent_errors', 0, -this.MAX_RECENT_ERRORS - 1); // Keep only latest errors
 
         } catch (redisError) {
             logger.error('Failed to log error to Redis', { redisError });
         }
     }
 
-    // گرفتن خطاهای اخیر از Redis
+    // Get recent errors from Redis
     static async getRecentErrors(limit: number = 50): Promise<any[]> {
         try {
             const errorKeys = await redisClient.zRange('recent_errors', -limit, -1, { REV: true });
@@ -132,7 +133,7 @@ class ErrorManager {
         }
     }
 
-    // آمار خطاها با کش
+    // Get error statistics with caching
     static async getErrorStats(): Promise<any> {
         const cacheKey = 'error_stats';
 
@@ -163,7 +164,7 @@ class ErrorManager {
     }
 }
 
-// 🎯 تابع اصلی مدیریت خطا
+// Main error handling middleware
 export const errorHandler = (
     error: Error | AppError,
     req: Request,
@@ -185,11 +186,11 @@ export const errorHandler = (
         timestamp: new Date().toISOString()
     };
 
-    // 🎯 مدیریت انواع مختلف خطاها
+    // Handle different types of errors
     if (error instanceof AppError) {
         logger.warn('Operational error handled', errorData);
 
-        // ذخیره در Redis (غیرهمزمان)
+        // Store in Redis (asynchronously)
         ErrorManager.logErrorToRedis(errorData).catch(() => { });
 
         return res.status(error.statusCode).json({
@@ -203,7 +204,7 @@ export const errorHandler = (
         });
     }
 
-    // خطاهای JWT
+    // JWT specific errors
     if (error.name === 'JsonWebTokenError') {
         logger.warn('JWT error', errorData);
         ErrorManager.logErrorToRedis(errorData).catch(() => { });
@@ -226,7 +227,7 @@ export const errorHandler = (
         });
     }
 
-    // خطاهای MongoDB
+    // MongoDB errors
     if (error.name === 'MongoError' || error.name === 'MongoServerError') {
         logger.error('Database error', errorData);
         ErrorManager.logErrorToRedis(errorData).catch(() => { });
@@ -242,7 +243,7 @@ export const errorHandler = (
         });
     }
 
-    // خطاهای سیستمی (ناشناخته)
+    // System errors (unknown)
     logger.error('Unhandled system error', errorData);
     ErrorManager.logErrorToRedis(errorData).catch(() => { });
 
@@ -262,20 +263,20 @@ export const errorHandler = (
     res.status(500).json(response);
 };
 
-// 🎯 middleware برای خطاهای 404
+// Middleware for 404 errors
 export const notFoundHandler = (req: Request, res: Response, next: NextFunction) => {
     const error = new NotFoundError(`Route not found: ${req.method} ${req.url}`);
     next(error);
 };
 
-// 🎯 middleware برای خطاهای async
+// Middleware for async errors
 export const asyncErrorHandler = (fn: Function) => {
     return (req: Request, res: Response, next: NextFunction) => {
         Promise.resolve(fn(req, res, next)).catch(next);
     };
 };
 
-// 🎯 route برای مدیریت خطاها (Admin only)
+// Route to get error logs (Admin only)
 export const getErrorLogs = async (req: AuthRequest, res: Response) => {
     try {
         const { limit = 50 } = req.query;
