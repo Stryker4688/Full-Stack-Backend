@@ -1,88 +1,90 @@
-// backend/src/config/redis.ts
+// backend/src/config/redis.ts - اصلاح نوع بازگشتی
 import { createClient } from 'redis';
+import { logger } from './logger';
 
 const redisClient = createClient({
     socket: {
         host: process.env.REDIS_HOST || 'localhost',
         port: parseInt(process.env.REDIS_PORT || '6379'),
-        // اضافه کردن reconnect strategy
         reconnectStrategy: (retries) => {
             if (retries > 10) {
                 console.log('❌ Too many reconnection attempts to Redis');
                 return new Error('Too many reconnects');
             }
-            return Math.min(retries * 100, 3000); // حداکثر 3 ثانیه
+            return Math.min(retries * 100, 3000);
         },
-        connectTimeout: 10000, // 10 ثانیه timeout برای اتصال
+        connectTimeout: 10000,
     },
     password: process.env.REDIS_PASSWORD || undefined,
-    // اضافه کردن ping interval برای حفظ connection
-    pingInterval: 30000 // هر 30 ثانیه
+    pingInterval: 30000
 });
 
-// Event handlers بهبود یافته
+// Event handlers
 redisClient.on('error', (err) => {
-    console.error('❌ Redis Client Error:', err);
+    logger.error('❌ Redis Client Error:', err);
 });
 
 redisClient.on('connect', () => {
-    console.log('✅ Connected to Redis successfully');
+    logger.info('✅ Connected to Redis successfully');
 });
 
 redisClient.on('ready', () => {
-    console.log('🚀 Redis client is ready');
+    logger.info('🚀 Redis client is ready');
 });
 
 redisClient.on('reconnecting', () => {
-    console.log('🔄 Redis is reconnecting...');
+    logger.warn('🔄 Redis is reconnecting...');
 });
 
 redisClient.on('end', () => {
-    console.log('🔴 Redis connection closed');
+    logger.warn('🔴 Redis connection closed');
 });
 
-// متصل کردن به Redis با قابلیت retry
 const connectRedis = async (maxRetries = 5): Promise<void> => {
     let retries = 0;
 
     while (retries < maxRetries) {
         try {
             await redisClient.connect();
-            console.log('🎯 Redis connected successfully');
+            logger.info('🎯 Redis connected successfully');
             return;
         } catch (error) {
             retries++;
-            console.error(`❌ Redis connection failed (attempt ${retries}/${maxRetries}):`, error);
+            logger.error(`❌ Redis connection failed (attempt ${retries}/${maxRetries}):`, error);
 
             if (retries === maxRetries) {
-                console.error('💥 Failed to connect to Redis after maximum retries');
+                logger.error('💥 Failed to connect to Redis after maximum retries');
                 process.exit(1);
             }
 
-            // انتظار قبل از retry بعدی
             await new Promise(resolve => setTimeout(resolve, 2000 * retries));
         }
     }
 };
 
-// تابع health check برای Redis
-const checkRedisHealth = async (): Promise<boolean> => {
+// 🔽 اصلاح نوع بازگشتی این تابع
+const checkRedisHealth = async (): Promise<{ healthy: boolean; latency?: number }> => {
     try {
+        const start = Date.now();
         await redisClient.ping();
-        return true;
+        const latency = Date.now() - start;
+
+        return {
+            healthy: true,
+            latency
+        };
     } catch (error) {
-        console.error('❌ Redis health check failed:', error);
-        return false;
+        logger.error('❌ Redis health check failed:', error);
+        return { healthy: false };
     }
 };
 
-// تابع graceful shutdown
 const disconnectRedis = async (): Promise<void> => {
     try {
         await redisClient.quit();
-        console.log('🔴 Redis disconnected gracefully');
+        logger.info('🔴 Redis disconnected gracefully');
     } catch (error) {
-        console.error('❌ Error disconnecting Redis:', error);
+        logger.error('❌ Error disconnecting Redis:', error);
     }
 };
 

@@ -1,51 +1,51 @@
-// backend/src/middlewares/productValidation.ts - Updated
+// backend/src/middlewares/productValidation.ts
 import { body } from 'express-validator';
 import { validateRequest } from './validation';
 
 export const productValidation = [
     body('name')
         .notEmpty()
-        .withMessage('Product name is required')
+        .withMessage('نام محصول الزامی است')
         .isLength({ min: 2, max: 100 })
-        .withMessage('Product name must be between 2 and 100 characters')
+        .withMessage('نام محصول باید بین ۲ تا ۱۰۰ کاراکتر باشد')
         .trim(),
 
     body('description')
         .notEmpty()
-        .withMessage('Product description is required')
+        .withMessage('توضیحات محصول الزامی است')
         .isLength({ min: 10, max: 1000 })
-        .withMessage('Description must be between 10 and 1000 characters')
+        .withMessage('توضیحات باید بین ۱۰ تا ۱۰۰۰ کاراکتر باشد')
         .trim(),
 
     body('price')
         .isFloat({ min: 0 })
-        .withMessage('Price must be a positive number'),
+        .withMessage('قیمت باید عددی مثبت باشد'),
 
     body('originalPrice')
         .optional()
         .isFloat({ min: 0 })
-        .withMessage('Original price must be a positive number'),
+        .withMessage('قیمت اصلی باید عددی مثبت باشد'),
 
     body('category')
         .isIn(['coffee_beans', 'brewing_equipment', 'accessories', 'gift_sets'])
-        .withMessage('Invalid category'),
+        .withMessage('دسته‌بندی معتبر نیست'),
 
     body('roastLevel')
         .isIn(['light', 'medium', 'dark', 'espresso'])
-        .withMessage('Invalid roast level'),
+        .withMessage('سطح برشتگی معتبر نیست'),
 
     body('weight')
         .isFloat({ min: 0 })
-        .withMessage('Weight must be a positive number'),
+        .withMessage('وزن باید عددی مثبت باشد'),
 
     body('stockQuantity')
         .isInt({ min: 0 })
-        .withMessage('Stock quantity must be a positive integer'),
+        .withMessage('تعداد موجودی باید عدد صحیح مثبت باشد'),
 
     body('isFeatured')
         .optional()
         .isBoolean()
-        .withMessage('Featured status must be boolean'),
+        .withMessage('وضعیت محصول ویژه باید boolean باشد'),
 
     validateRequest
 ];

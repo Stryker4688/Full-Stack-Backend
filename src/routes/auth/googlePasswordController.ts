@@ -1,4 +1,4 @@
-// backend/src/controllers/googlePasswordController.ts - Complete implementation
+// backend/src/controllers/googlePasswordController.ts - Optimized with Redis
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import User from '../../models/users';
@@ -6,12 +6,7 @@ import { LoggerService } from '../../services/loggerServices';
 import { logger } from '../../config/logger';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import {
-    cacheGet,
-    cacheDelete,
-    clearUserCache,
-    generateKey
-} from '../../utils/cacheUtils';
+import { clearUserCache, cacheDeletePattern } from '../../utils/cacheUtils';
 
 export const setupGooglePassword = async (req: Request, res: Response) => {
     try {
@@ -21,7 +16,7 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             logger.warn('Google password setup - missing tempToken or password');
             return res.status(400).json({
                 success: false,
-                message: 'Temporary token and password are required'
+                message: 'Temp token and password are required'
             });
         }
 
@@ -33,12 +28,11 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             });
         }
 
-        // Verify temporary token
         let decoded: any;
         try {
             decoded = jwt.verify(tempToken, process.env.JWT_SECRET!);
         } catch (error) {
-            logger.warn('Google password setup - invalid or expired temporary token');
+            logger.warn('Google password setup - invalid or expired temp token');
             return res.status(401).json({
                 success: false,
                 message: 'Invalid or expired temporary token'
@@ -56,11 +50,9 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
         let user;
         let isNewUser = false;
 
-        // Handle new user registration (from Google OAuth)
         if (decoded.googleUser) {
             const { googleUser } = decoded;
 
-            // Check for existing user to prevent duplicates
             const existingUser = await User.findOne({
                 email: googleUser.email
             });
@@ -69,24 +61,22 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
                 logger.warn('Google password setup - user already exists', { email: googleUser.email });
                 return res.status(400).json({
                     success: false,
-                    message: 'User with this email already exists'
+                    message: 'User already exists'
                 });
             }
 
-            // Hash password with pepper
             const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
                 .update(password)
                 .digest('hex');
             const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-            // Create new user account
             user = new User({
                 googleId: googleUser.googleId,
                 email: googleUser.email,
                 name: googleUser.name,
                 avatar: googleUser.picture,
                 authProvider: 'google',
-                emailVerified: googleUser.emailVerified,
+                emailVerified: true,
                 password: hashedPassword,
                 lastLogin: new Date()
             });
@@ -94,22 +84,17 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             await user.save();
             isNewUser = true;
 
-            // Clear temporary cache
-            await cacheDelete(`temp_tokens:google:${googleUser.googleId}`);
-
             LoggerService.authLog(user._id.toString(), 'google_registration_completed', {
                 provider: 'google',
                 email: user.email
             });
 
-            logger.info('New Google user registration completed with password setup', {
+            logger.info('New Google user registration completed', {
                 userId: user._id.toString(),
                 email: user.email
             });
 
-        }
-        // Handle existing user adding password
-        else if (decoded.userId) {
+        } else if (decoded.userId) {
             user = await User.findById(decoded.userId);
 
             if (!user) {
@@ -120,19 +105,14 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
                 });
             }
 
-            // Hash new password with pepper
             const pepperedPassword = crypto.createHmac('sha256', process.env.PEPPER_SECRET!)
                 .update(password)
                 .digest('hex');
             const hashedPassword = await bcrypt.hash(pepperedPassword, 14);
 
-            // Update user password
             user.password = hashedPassword;
             user.lastLogin = new Date();
             await user.save();
-
-            // Clear temporary cache
-            await cacheDelete(`temp_tokens:password_setup:${user._id.toString()}`);
 
             LoggerService.authLog(user._id.toString(), 'google_password_setup', {
                 provider: 'google',
@@ -151,15 +131,14 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
             });
         }
 
-        // Generate main authentication token
+        // Clear user cache
+        await clearUserCache(user._id.toString());
+
         const token = jwt.sign(
             { userId: user._id.toString() },
             process.env.JWT_SECRET!,
             { expiresIn: '120d' }
         );
-
-        // Clear user cache to reflect changes
-        await clearUserCache(user._id.toString());
 
         logger.info('Google password setup completed successfully', {
             userId: user._id.toString(),
@@ -177,7 +156,7 @@ export const setupGooglePassword = async (req: Request, res: Response) => {
                 email: user.email,
                 role: user.role,
                 authProvider: user.authProvider,
-                emailVerified: user.emailVerified
+                emailVerified: true
             }
         });
 

@@ -1,4 +1,4 @@
-// backend/src/middlewares/validation.ts - Updated
+// backend/src/middleware/validation.ts
 import { Request, Response, NextFunction } from 'express';
 import { validationResult, body } from 'express-validator';
 
@@ -17,37 +17,63 @@ export const validateRequest = (req: Request, res: Response, next: NextFunction)
 export const registerValidation = [
   body('name')
     .notEmpty()
-    .withMessage('Name is required')
+    .withMessage('نام الزامی است')
     .isLength({ min: 2, max: 50 })
-    .withMessage('Name must be between 2 and 50 characters')
+    .withMessage('نام باید بین ۲ تا ۵۰ کاراکتر باشد')
     .trim(),
 
   body('email')
     .isEmail()
-    .withMessage('Valid email is required')
+    .withMessage('ایمیل معتبر نیست')
     .notEmpty()
-    .withMessage('Email is required')
-    .normalizeEmail(),
+    .withMessage('ایمیل الزامی هست'),
 
   body('password')
     .isLength({ min: 6 })
-    .withMessage('Password must be at least 6 characters')
+    .withMessage('رمز عبور باید حداقل ۶ کاراکتر باشد')
     .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-    .withMessage('Password must contain uppercase, lowercase letters and numbers'),
-
+    .withMessage('رمز عبور باید شامل حروف بزرگ، کوچک و اعداد باشد'),
   body('rememberMe')
     .optional()
     .isBoolean()
-    .withMessage('rememberMe must be boolean')
+    .withMessage('rememberMe باید boolean باشد')
 ];
 
 export const loginValidation = [
   body('email')
     .isEmail()
-    .withMessage('Valid email is required')
-    .normalizeEmail(),
+    .withMessage('ایمیل معتبر نیست'),
 
   body('password')
     .notEmpty()
-    .withMessage('Password is required')
+    .withMessage('رمز عبور الزامی است')
+];
+
+export const taskValidation = [
+  body('title')
+    .notEmpty()
+    .withMessage('عنوان تسک الزامی است')
+    .isLength({ min: 1, max: 100 })
+    .withMessage('عنوان باید بین ۱ تا ۱۰۰ کاراکتر باشد')
+    .trim(),
+
+  body('description')
+    .optional()
+    .isLength({ max: 500 })
+    .withMessage('توضیحات نمی‌تواند بیشتر از ۵۰۰ کاراکتر باشد')
+    .trim(),
+
+  body('priority')
+    .optional()
+    .isIn(['low', 'medium', 'high'])
+    .withMessage('اولویت باید low, medium یا high باشد'),
+
+  body('dueDate')
+    .optional()
+    .isISO8601()
+    .withMessage('تاریخ باید معتبر باشد'),
+  body('rememberMe')
+    .optional()
+    .isBoolean()
+    .withMessage('rememberMe باید boolean باشد')
 ];

@@ -1,4 +1,4 @@
-// backend/src/controllers/productController.ts - Completely rewritten
+// backend/src/controllers/productController.ts - Optimized with Redis
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import Product from '../../models/product';
@@ -28,7 +28,7 @@ const CACHE_KEYS = {
 export const getFeaturedProducts = async (req: AuthRequest, res: Response) => {
     try {
         const { limit = 8 } = req.query;
-        const cacheKey = `${CACHE_KEYS.FEATURED}:${limit}`;
+        const cacheKey = generateKey.featuredProducts(Number(limit));
 
         const products = await cacheWithFallback(
             cacheKey,
@@ -50,7 +50,7 @@ export const getFeaturedProducts = async (req: AuthRequest, res: Response) => {
 
         logger.debug('Featured products retrieved successfully', {
             count: products.length,
-            fromCache: true // This is handled internally by cacheWithFallback
+            fromCache: products.fromCache
         });
 
         res.json({
@@ -87,7 +87,7 @@ export const getMenuProducts = async (req: AuthRequest, res: Response) => {
             sortOrder = 'desc'
         } = req.query;
 
-        const cacheKey = `${CACHE_KEYS.MENU}:${page}:${limit}:${category}:${roastLevel}:${minPrice}:${maxPrice}:${sortBy}:${sortOrder}`;
+        const cacheKey = generateKey.menuProducts(`${page}:${limit}:${category}:${roastLevel}:${minPrice}:${maxPrice}:${sortBy}:${sortOrder}`);
 
         const responseData = await cacheWithFallback(
             cacheKey,
@@ -178,7 +178,7 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        const cacheKey = `${CACHE_KEYS.SEARCH}:${query}:${page}:${limit}:${category}:${roastLevel}`;
+        const cacheKey = generateKey.productSearch(query as string, `${page}:${limit}:${category}:${roastLevel}`);
 
         const responseData = await cacheWithFallback(
             cacheKey,
@@ -243,7 +243,7 @@ export const searchProducts = async (req: AuthRequest, res: Response) => {
 export const getProductById = async (req: AuthRequest, res: Response) => {
     try {
         const { id } = req.params;
-        const cacheKey = `${CACHE_KEYS.PRODUCT_DETAIL}:${id}`;
+        const cacheKey = generateKey.productDetail(id);
 
         const product = await cacheWithFallback(
             cacheKey,
@@ -606,7 +606,7 @@ export const getAdminProducts = async (req: AuthRequest, res: Response) => {
             search
         } = req.query;
 
-        const cacheKey = `admin_products:${page}:${limit}:${isActive}:${isFeatured}:${category}:${search}`;
+        const cacheKey = generateKey.adminProducts(`${page}:${limit}:${isActive}:${isFeatured}:${category}:${search}`);
 
         const responseData = await cacheWithFallback(
             cacheKey,
@@ -672,7 +672,7 @@ export const getAdminProducts = async (req: AuthRequest, res: Response) => {
 // Helper functions
 const getPopularProductsForMenu = async (limit: number = 6): Promise<any[]> => {
     try {
-        const cacheKey = `${CACHE_KEYS.POPULAR}:${limit}`;
+        const cacheKey = generateKey.popularProducts(limit);
 
         return await cacheWithFallback(
             cacheKey,
@@ -685,8 +685,6 @@ const getPopularProductsForMenu = async (limit: number = 6): Promise<any[]> => {
                     .populate('createdBy', 'name')
                     .select('name price originalPrice images category roastLevel description')
                     .sort({
-                        // You can implement popularity algorithm here
-                        // For now, using creation date and random factor
                         createdAt: -1
                     })
                     .limit(limit);

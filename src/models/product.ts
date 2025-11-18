@@ -48,13 +48,11 @@ const productSchema = new mongoose.Schema({
         type: String,
         enum: ['coffee_beans', 'brewing_equipment', 'accessories', 'gift_sets'],
         required: true
-        // ❌ REMOVED: index: true (define in schema.index below)
     },
     roastLevel: {
         type: String,
         enum: ['light', 'medium', 'dark', 'espresso'],
         required: true
-        // ❌ REMOVED: index: true (define in schema.index below)
     },
     flavorProfile: [{
         type: String,
@@ -82,12 +80,10 @@ const productSchema = new mongoose.Schema({
     isFeatured: {
         type: Boolean,
         default: false
-        // ❌ REMOVED: index: true (define in schema.index below)
     },
     isActive: {
         type: Boolean,
         default: true
-        // ❌ REMOVED: index: true (define in schema.index below)
     },
     images: [{
         type: String
@@ -106,7 +102,7 @@ const productSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// ✅ Define ALL indexes here in one place
+// Define ALL indexes
 productSchema.index({
     name: 'text',
     description: 'text',
@@ -121,8 +117,8 @@ productSchema.index({ roastLevel: 1 });
 productSchema.index({ price: 1 });
 productSchema.index({ createdAt: -1 });
 productSchema.index({ 'searchKeywords': 1 });
-productSchema.index({ inStock: 1 }); // Added for better querying
-productSchema.index({ createdBy: 1 }); // Added for better querying
+productSchema.index({ inStock: 1 });
+productSchema.index({ createdBy: 1 });
 
 // Virtual for discount percentage
 productSchema.virtual('discountPercentage').get(function () {

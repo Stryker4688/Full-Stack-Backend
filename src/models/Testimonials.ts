@@ -1,4 +1,4 @@
-// backend/src/models/Testimonials.ts - FIXED
+// backend/src/models/Testimonials.ts
 import mongoose from 'mongoose';
 
 export interface ITestimonial extends mongoose.Document {
@@ -51,7 +51,7 @@ const testimonialSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// ✅ Define indexes ONLY here
+// Define indexes
 testimonialSchema.index({ isApproved: 1, isActive: 1 });
 testimonialSchema.index({ rating: -1 });
 testimonialSchema.index({ createdAt: -1 });

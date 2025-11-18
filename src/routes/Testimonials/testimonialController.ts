@@ -1,4 +1,4 @@
-// backend/src/controllers/testimonialController.ts - Optimized with cache utilities
+// backend/src/controllers/testimonialController.ts - Optimized with Redis
 import { Response } from 'express';
 import { AuthRequest } from '../../middlewares/auth';
 import Testimonial from '../../models/Testimonials';
@@ -127,7 +127,7 @@ export const getApprovedTestimonials = async (req: AuthRequest, res: Response) =
 
         res.json({
             ...responseData,
-            fromCache: true // Indicate that data came from cache (handled internally in cacheWithFallback)
+            fromCache: responseData.fromCache
         });
 
     } catch (error: any) {
@@ -353,7 +353,7 @@ export const deleteTestimonial = async (req: AuthRequest, res: Response) => {
 // Get testimonial statistics
 export const getTestimonialStats = async (req: AuthRequest, res: Response) => {
     try {
-        const cacheKey = 'testimonial_stats';
+        const cacheKey = generateKey.testimonialStats();
 
         const stats = await cacheWithFallback(
             cacheKey,

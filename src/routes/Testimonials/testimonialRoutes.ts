@@ -2,6 +2,7 @@
 import express from 'express';
 import { authenticateToken } from '../../middlewares/auth';
 import { requireAdmin } from '../../middlewares/adminAuth';
+import { testimonialValidation } from '../../middlewares/testimonialValidation';
 import {
     createTestimonial,
     getApprovedTestimonials,
@@ -16,7 +17,7 @@ const router = express.Router();
 
 // ✅ Public routes for users - no authentication required
 router.get('/testimonials/approved', getApprovedTestimonials);
-router.post('/testimonials', createTestimonial);
+router.post('/testimonials', testimonialValidation, createTestimonial);
 router.get('/testimonials/stats', getTestimonialStats);
 
 // ✅ Administrative routes for admin - with authentication

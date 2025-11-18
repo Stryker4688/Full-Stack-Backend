@@ -3,307 +3,215 @@ import nodemailer from 'nodemailer';
 import { logger } from '../config/logger';
 
 export class EmailService {
-    private static transporter: nodemailer.Transporter;
+  private static transporter: nodemailer.Transporter;
 
-    static initialize() {
-        if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-            console.error('❌ SMTP configuration is missing');
-            logger.error('SMTP configuration is missing');
-            return;
-        }
+  static initialize() {
+    this.transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT || '587'),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
 
-        this.transporter = nodemailer.createTransport({
-            host: process.env.SMTP_HOST || 'smtp.gmail.com',
-            port: parseInt(process.env.SMTP_PORT || '587'),
-            secure: false,
-            auth: {
-                user: process.env.SMTP_USER,
-                pass: process.env.SMTP_PASS
-            },
-            tls: {
-                rejectUnauthorized: false
-            }
-        });
+    // Verify connection configuration
+    this.transporter.verify((error) => {
+      if (error) {
+        logger.error('SMTP connection failed:', error);
+      } else {
+        logger.info('SMTP server is ready to send emails');
+      }
+    });
+  }
 
-        console.log('✅ Gmail SMTP Service Initialized');
-        logger.info('Gmail SMTP Service Initialized');
+  private static async sendEmail(to: string, subject: string, html: string): Promise<boolean> {
+    try {
+      const mailOptions = {
+        from: `"${process.env.EMAIL_FROM_NAME || 'App Team'}" <${process.env.EMAIL_FROM_ADDRESS}>`,
+        to,
+        subject,
+        html,
+      };
+
+      await this.transporter.sendMail(mailOptions);
+      logger.debug('Email sent successfully', { to, subject });
+      return true;
+    } catch (error: any) {
+      logger.error('Failed to send email', {
+        to,
+        subject,
+        error: error.message
+      });
+      return false;
     }
+  }
 
-    static async testSMTPConnection(): Promise<boolean> {
-        try {
-            if (!this.transporter) {
-                console.error('❌ SMTP transporter not initialized');
-                return false;
-            }
+  static async sendVerificationCode(
+    email: string,
+    code: string,
+    name: string
+  ): Promise<boolean> {
+    const subject = 'Verify Your Email Address';
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; color: white; border-radius: 10px 10px 0 0; }
+          .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
+          .code { font-size: 32px; font-weight: bold; text-align: center; letter-spacing: 5px; color: #667eea; margin: 20px 0; padding: 15px; background: white; border-radius: 8px; }
+          .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #666; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Email Verification</h1>
+          </div>
+          <div class="content">
+            <h2>Hello ${name},</h2>
+            <p>Thank you for registering! Please use the verification code below to verify your email address:</p>
+            <div class="code">${code}</div>
+            <p>This code will expire in 10 minutes.</p>
+            <p>If you didn't create an account, please ignore this email.</p>
+          </div>
+          <div class="footer">
+            <p>&copy; ${new Date().getFullYear()} Your App Team. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
 
-            await this.transporter.verify();
-            console.log('✅ Gmail SMTP Connection Successful');
-            logger.info('Gmail SMTP Connection Successful');
-            return true;
-        } catch (error: any) {
-            console.error('❌ Gmail SMTP Connection Failed:', error.message);
-            logger.error('Gmail SMTP Connection Failed', { error: error.message });
-            return false;
-        }
-    }
+    return this.sendEmail(email, subject, html);
+  }
 
-    static async sendVerificationCode(email: string, code: string, name: string): Promise<boolean> {
-        try {
-            const mailOptions = {
-                from: `"Brew Haven" <${process.env.SMTP_FROM_EMAIL}>`,
-                to: email,
-                subject: 'Your 6-Digit Verification Code - Brew Haven',
-                html: `
-                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                        <div style="background: linear-gradient(135deg, #d97706, #b45309); padding: 30px; text-align: center; color: white;">
-                            <h1 style="margin: 0; font-size: 28px;">☕ Brew Haven</h1>
-                            <p style="margin: 10px 0 0 0; opacity: 0.9;">Email Verification Code</p>
-                        </div>
-                        
-                        <div style="padding: 30px; background: #f8fafc;">
-                            <h2 style="color: #1f2937; margin-bottom: 20px;">Hello ${name},</h2>
-                            
-                            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 25px;">
-                                Thank you for registering with Brew Haven! Use the 6-digit verification code below to complete your registration:
-                            </p>
-                            
-                            <div style="text-align: center; margin: 30px 0;">
-                                <div style="background: linear-gradient(135deg, #d97706, #b45309); color: white; padding: 25px; border-radius: 12px; 
-                                          font-size: 36px; font-weight: bold; letter-spacing: 10px; display: inline-block;
-                                          font-family: 'Courier New', monospace; min-width: 250px; text-align: center;">
-                                    ${code}
-                                </div>
-                            </div>
-                            
-                            <div style="background: #fef3c7; border: 1px solid #f59e0b; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                                <p style="color: #92400e; margin: 0; text-align: center; font-size: 14px; font-weight: bold;">
-                                    ⏰ This code will expire in 10 minutes
-                                </p>
-                            </div>
-                            
-                            <p style="color: #6b7280; font-size: 14px; text-align: center;">
-                                Enter this 6-digit code on the verification page to activate your account.<br>
-                                If you didn't request this code, please ignore this email.
-                            </p>
-                        </div>
-                        
-                        <div style="background: #1f2937; padding: 20px; text-align: center; color: #9ca3af;">
-                            <p style="margin: 0; font-size: 12px;">
-                                &copy; 2024 Brew Haven. All rights reserved.<br>
-                                123 Coffee Street, Brew City
-                            </p>
-                        </div>
-                    </div>
-                `
-            };
+  static async sendWelcomeEmail(
+    email: string,
+    name: string
+  ): Promise<boolean> {
+    const subject = 'Welcome to Our App!';
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); padding: 30px; text-align: center; color: white; border-radius: 10px 10px 0 0; }
+          .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
+          .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #666; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Welcome Aboard!</h1>
+          </div>
+          <div class="content">
+            <h2>Hello ${name},</h2>
+            <p>Your email has been successfully verified and your account is now active!</p>
+            <p>We're excited to have you join our community. You can now access all features of our application.</p>
+            <p>If you have any questions, feel free to contact our support team.</p>
+            <p>Happy exploring!</p>
+          </div>
+          <div class="footer">
+            <p>&copy; ${new Date().getFullYear()} Your App Team. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
 
-            const info = await this.transporter.sendMail(mailOptions);
+    return this.sendEmail(email, subject, html);
+  }
 
-            console.log('✅ Verification code email sent:', {
-                to: email,
-                code: code,
-                messageId: info.messageId
-            });
+  static async sendPasswordResetCode(
+    email: string,
+    code: string,
+    name: string
+  ): Promise<boolean> {
+    const subject = 'Your Password Reset Code';
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; color: white; border-radius: 10px 10px 0 0; }
+          .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
+          .code { font-size: 32px; font-weight: bold; text-align: center; letter-spacing: 5px; color: #667eea; margin: 20px 0; padding: 15px; background: white; border-radius: 8px; }
+          .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #666; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Password Reset Code</h1>
+          </div>
+          <div class="content">
+            <h2>Hello ${name},</h2>
+            <p>You requested to reset your password. Use the verification code below:</p>
+            <div class="code">${code}</div>
+            <p>This code will expire in 10 minutes.</p>
+            <p>If you didn't request this, please ignore this email and your password will remain unchanged.</p>
+          </div>
+          <div class="footer">
+            <p>&copy; ${new Date().getFullYear()} Your App Team. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
 
-            logger.info('Verification code email sent successfully', {
-                email,
-                code,
-                messageId: info.messageId
-            });
-            return true;
-        } catch (error: any) {
-            console.error('❌ Failed to send verification code email:', error.message);
-            logger.error('Failed to send verification code email', {
-                email,
-                error: error.message
-            });
-            return false;
-        }
-    }
+    return this.sendEmail(email, subject, html);
+  }
 
-    static async sendWelcomeEmail(email: string, name: string): Promise<boolean> {
-        try {
-            const mailOptions = {
-                from: `"Brew Haven" <${process.env.SMTP_FROM_EMAIL}>`,
-                to: email,
-                subject: 'Welcome to Brew Haven! 🎉',
-                html: `
-                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                        <div style="background: linear-gradient(135deg, #d97706, #b45309); padding: 30px; text-align: center; color: white;">
-                            <h1 style="margin: 0; font-size: 28px;">☕ Welcome to Brew Haven!</h1>
-                        </div>
-                        
-                        <div style="padding: 30px; background: #f8fafc;">
-                            <h2 style="color: #1f2937; margin-bottom: 20px;">Hello ${name},</h2>
-                            
-                            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 20px;">
-                                Your email has been successfully verified! Welcome to our community of coffee enthusiasts.
-                            </p>
-                            
-                            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 25px;">
-                                Now you can:
-                            </p>
-                            
-                            <ul style="color: #4b5563; line-height: 1.6; margin-bottom: 25px;">
-                                <li>🎯 Explore our premium coffee beans collection</li>
-                                <li>⭐ Get personalized coffee recommendations</li>
-                                <li>💰 Access exclusive member discounts</li>
-                                <li>📦 Track your orders and brewing history</li>
-                            </ul>
-                            
-                            <div style="text-align: center; margin: 30px 0;">
-                                <a href="${process.env.FRONTEND_URL}" 
-                                   style="background: #d97706; color: white; padding: 12px 30px; 
-                                          text-decoration: none; border-radius: 8px; font-weight: bold;
-                                          display: inline-block; font-size: 16px;">
-                                    Start Exploring
-                                </a>
-                            </div>
-                        </div>
-                        
-                        <div style="background: #1f2937; padding: 20px; text-align: center; color: #9ca3af;">
-                            <p style="margin: 0; font-size: 12px;">
-                                &copy; 2024 Brew Haven. All rights reserved.
-                            </p>
-                        </div>
-                    </div>
-                `
-            };
+  static async sendPasswordChangedConfirmation(
+    email: string,
+    name: string
+  ): Promise<boolean> {
+    const subject = 'Password Changed Successfully';
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); padding: 30px; text-align: center; color: white; border-radius: 10px 10px 0 0; }
+          .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
+          .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #666; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Password Updated</h1>
+          </div>
+          <div class="content">
+            <h2>Hello ${name},</h2>
+            <p>Your password has been changed successfully.</p>
+            <p>If you didn't make this change, please contact our support team immediately.</p>
+            <p>For security reasons, if you didn't authorize this change, we recommend contacting support right away.</p>
+          </div>
+          <div class="footer">
+            <p>&copy; ${new Date().getFullYear()} Your App Team. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
 
-            const info = await this.transporter.sendMail(mailOptions);
-            logger.info('Welcome email sent successfully', {
-                email,
-                messageId: info.messageId
-            });
-            return true;
-        } catch (error: any) {
-            console.error('❌ Failed to send welcome email:', error.message);
-            logger.error('Failed to send welcome email', {
-                email,
-                error: error.message
-            });
-            return false;
-        }
-    }
-    static async sendPasswordResetCode(email: string, code: string, name: string): Promise<boolean> {
-        try {
-            const mailOptions = {
-                from: `"Brew Haven" <${process.env.SMTP_FROM_EMAIL}>`,
-                to: email,
-                subject: 'Password Reset Code - Brew Haven',
-                html: `
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                    <div style="background: linear-gradient(135deg, #dc2626, #b91c1c); padding: 30px; text-align: center; color: white;">
-                        <h1 style="margin: 0; font-size: 28px;">🔐 Password Reset</h1>
-                        <p style="margin: 10px 0 0 0; opacity: 0.9;">Brew Haven Account</p>
-                    </div>
-                    
-                    <div style="padding: 30px; background: #f8fafc;">
-                        <h2 style="color: #1f2937; margin-bottom: 20px;">Hello ${name},</h2>
-                        
-                        <p style="color: #4b5563; line-height: 1.6; margin-bottom: 25px;">
-                            We received a request to reset your password. Use the 6-digit code below to proceed:
-                        </p>
-                        
-                        <div style="text-align: center; margin: 30px 0;">
-                            <div style="background: linear-gradient(135deg, #dc2626, #b91c1c); color: white; padding: 25px; border-radius: 12px; 
-                                      font-size: 36px; font-weight: bold; letter-spacing: 10px; display: inline-block;
-                                      font-family: 'Courier New', monospace; min-width: 250px; text-align: center;">
-                                ${code}
-                            </div>
-                        </div>
-                        
-                        <div style="background: #fecaca; border: 1px solid #f87171; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                            <p style="color: #7f1d1d; margin: 0; text-align: center; font-size: 14px; font-weight: bold;">
-                                ⏰ This code will expire in 10 minutes
-                            </p>
-                        </div>
-                        
-                        <p style="color: #6b7280; font-size: 14px; text-align: center;">
-                            If you didn't request this reset, please ignore this email or contact support if you have concerns.
-                        </p>
-                    </div>
-                    
-                    <div style="background: #1f2937; padding: 20px; text-align: center; color: #9ca3af;">
-                        <p style="margin: 0; font-size: 12px;">
-                            &copy; 2024 Brew Haven. All rights reserved.<br>
-                            123 Coffee Street, Brew City
-                        </p>
-                    </div>
-                </div>
-            `
-            };
-
-            const info = await this.transporter.sendMail(mailOptions);
-
-            logger.info('Password reset code email sent successfully', {
-                email,
-                code,
-                messageId: info.messageId
-            });
-            return true;
-        } catch (error: any) {
-            console.error('❌ Failed to send password reset code email:', error.message);
-            logger.error('Failed to send password reset code email', {
-                email,
-                error: error.message
-            });
-            return false;
-        }
-    }
-
-    static async sendPasswordChangedConfirmation(email: string, name: string): Promise<boolean> {
-        try {
-            const mailOptions = {
-                from: `"Brew Haven" <${process.env.SMTP_FROM_EMAIL}>`,
-                to: email,
-                subject: 'Password Changed Successfully - Brew Haven',
-                html: `
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                    <div style="background: linear-gradient(135deg, #059669, #047857); padding: 30px; text-align: center; color: white;">
-                        <h1 style="margin: 0; font-size: 28px;">✅ Password Updated</h1>
-                    </div>
-                    
-                    <div style="padding: 30px; background: #f8fafc;">
-                        <h2 style="color: #1f2937; margin-bottom: 20px;">Hello ${name},</h2>
-                        
-                        <p style="color: #4b5563; line-height: 1.6; margin-bottom: 20px;">
-                            Your password has been successfully updated. If you made this change, no further action is needed.
-                        </p>
-                        
-                        <div style="background: #d1fae5; border: 1px solid #34d399; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                            <p style="color: #065f46; margin: 0; text-align: center; font-size: 14px; font-weight: bold;">
-                                🔒 Your account security is important to us
-                            </p>
-                        </div>
-                        
-                        <p style="color: #6b7280; font-size: 14px; margin-bottom: 25px;">
-                            If you didn't make this change, please contact our support team immediately.
-                        </p>
-                    </div>
-                    
-                    <div style="background: #1f2937; padding: 20px; text-align: center; color: #9ca3af;">
-                        <p style="margin: 0; font-size: 12px;">
-                            &copy; 2024 Brew Haven. All rights reserved.
-                        </p>
-                    </div>
-                </div>
-            `
-            };
-
-            const info = await this.transporter.sendMail(mailOptions);
-            logger.info('Password change confirmation email sent successfully', {
-                email,
-                messageId: info.messageId
-            });
-            return true;
-        } catch (error: any) {
-            console.error('❌ Failed to send password change confirmation email:', error.message);
-            logger.error('Failed to send password change confirmation email', {
-                email,
-                error: error.message
-            });
-            return false;
-        }
-    }
+    return this.sendEmail(email, subject, html);
+  }
 }

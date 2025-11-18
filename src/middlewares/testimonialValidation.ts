@@ -1,31 +1,31 @@
-// backend/src/middlewares/testimonialValidation.ts - Updated
+// backend/src/middlewares/testimonialValidation.ts
 import { body } from 'express-validator';
 import { validateRequest } from './validation';
 
 export const testimonialValidation = [
     body('name')
         .notEmpty()
-        .withMessage('Name is required')
+        .withMessage('نام الزامی است')
         .isLength({ min: 2, max: 50 })
-        .withMessage('Name must be between 2 and 50 characters')
+        .withMessage('نام باید بین ۲ تا ۵۰ کاراکتر باشد')
         .trim(),
 
     body('email')
         .isEmail()
-        .withMessage('Valid email is required')
+        .withMessage('ایمیل معتبر نیست')
         .normalizeEmail(),
 
     body('message')
         .notEmpty()
-        .withMessage('Testimonial message is required')
+        .withMessage('متن نظر الزامی است')
         .isLength({ min: 10, max: 500 })
-        .withMessage('Message must be between 10 and 500 characters')
+        .withMessage('متن نظر باید بین ۱۰ تا ۵۰۰ کاراکتر باشد')
         .trim(),
 
     body('rating')
         .optional()
         .isInt({ min: 1, max: 5 })
-        .withMessage('Rating must be between 1 and 5'),
+        .withMessage('امتیاز باید بین ۱ تا ۵ باشد'),
 
     validateRequest
 ];

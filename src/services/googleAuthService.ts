@@ -8,7 +8,7 @@ export class GoogleAuthService {
         logger.info('Google Auth Service Initialized');
     }
 
-    // authorization code to idToken
+    // 🆕 متد جدید برای تبدیل authorization code به idToken
     static async getTokenFromCode(code: string): Promise<string> {
         try {
             console.log('🔄 Exchanging authorization code for tokens...');
@@ -51,7 +51,7 @@ export class GoogleAuthService {
         }
     }
 
-    // verify token
+    // متد موجود برای verify token
     static async verifyToken(idToken: string) {
         try {
             console.log('🔧 Verifying token via Google TokenInfo API...');

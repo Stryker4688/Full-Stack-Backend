@@ -1,46 +1,90 @@
-// backend/src/middlewares/adminAuth.ts - Updated
+// backend/src/middleware/adminAuth.ts - Optimized with Redis
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from './auth';
 import User from '../models/users';
+import { logger } from '../config/logger';
+import { cacheWithFallback, generateKey, CACHE_TTL } from '../utils/cacheUtils';
 
-// Only super admin (only for creating/deleting admin)
+// فقط سوپر ادمین (فقط برای ایجاد/حذف ادمین)
 export const requireSuperAdmin = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
+        logger.debug('🔍 Checking Super Admin access', { userId: req.userId });
+
         if (!req.userId) {
-            res.status(401).json({ message: 'Unauthorized access' });
+            logger.warn('Super Admin check failed - no userId');
+            res.status(401).json({ message: 'دسترسی غیرمجاز' });
             return;
         }
 
-        const user = await User.findById(req.userId);
+        // Check user with cache
+        const user = await cacheWithFallback(
+            generateKey.userProfile(req.userId),
+            async () => await User.findById(req.userId),
+            CACHE_TTL.USER_PROFILE
+        );
+
+        logger.debug('🔍 Found user for super admin check:', user ? {
+            id: user._id,
+            email: user.email,
+            role: user.role
+        } : 'User not found');
+
         if (!user || user.role !== 'super_admin') {
-            res.status(403).json({ message: 'Only super admin is authorized' });
+            logger.warn('Super Admin check failed - invalid role', {
+                userId: req.userId,
+                userRole: user?.role
+            });
+            res.status(403).json({ message: 'فقط سوپر ادمین مجاز است' });
             return;
         }
 
         req.user = user;
+        logger.info('Super Admin access granted', { userId: req.userId });
         next();
     } catch (error) {
-        res.status(500).json({ message: 'Error checking access permissions' });
+        logger.error('خطا در بررسی دسترسی سوپر ادمین', { error, userId: req.userId });
+        res.status(500).json({ message: 'خطا در بررسی دسترسی' });
     }
 };
 
-// Admin and super admin (for all other tasks)
+// ادمین و سوپر ادمین (برای تمام کارهای دیگر)
 export const requireAdmin = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
+        logger.debug('🔍 Checking Admin access', { userId: req.userId });
+
         if (!req.userId) {
-            res.status(401).json({ message: 'Unauthorized access' });
+            logger.warn('Admin check failed - no userId');
+            res.status(401).json({ message: 'دسترسی غیرمجاز' });
             return;
         }
 
-        const user = await User.findById(req.userId);
+        // Check user with cache
+        const user = await cacheWithFallback(
+            generateKey.userProfile(req.userId),
+            async () => await User.findById(req.userId),
+            CACHE_TTL.USER_PROFILE
+        );
+
+        logger.debug('🔍 Found user for admin check:', user ? {
+            id: user._id,
+            email: user.email,
+            role: user.role
+        } : 'User not found');
+
         if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
-            res.status(403).json({ message: 'Only administrators are authorized' });
+            logger.warn('Admin check failed - invalid role', {
+                userId: req.userId,
+                userRole: user?.role
+            });
+            res.status(403).json({ message: 'فقط ادمین‌ها مجاز هستند' });
             return;
         }
 
         req.user = user;
+        logger.info('Admin access granted', { userId: req.userId, role: user.role });
         next();
     } catch (error) {
-        res.status(500).json({ message: 'Error checking access permissions' });
+        logger.error('خطا در بررسی دسترسی ادمین', { error, userId: req.userId });
+        res.status(500).json({ message: 'خطا در بررسی دسترسی' });
     }
 };

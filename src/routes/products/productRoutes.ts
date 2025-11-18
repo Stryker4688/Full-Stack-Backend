@@ -1,8 +1,9 @@
-// backend/src/routes/productRoutes.ts - Updated with English comments
+// backend/src/routes/productRoutes.ts
 import express from 'express';
 import { authenticateToken } from '../../middlewares/auth';
 import { requireAdmin } from '../../middlewares/adminAuth';
 import upload from '../../config/multerConfig';
+import { productValidation } from '../../middlewares/productValidation';
 import {
     createProduct,
     updateProduct,
@@ -10,12 +11,11 @@ import {
     getProductById,
     deleteProductImage,
     getAdminProducts,
-    getFeaturedProducts,    // For home page - offer section
-    getMenuProducts,        // For home page - menu section
-    searchProducts,         // For menu search
-    getPopularProducts      // For popular products in menu
+    getFeaturedProducts,
+    getMenuProducts,
+    searchProducts,
+    getPopularProducts
 } from './productController';
-import { productValidation } from '../../middlewares/productValidation';
 
 const router = express.Router();
 

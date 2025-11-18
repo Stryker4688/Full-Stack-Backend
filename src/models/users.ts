@@ -1,4 +1,4 @@
-// backend/src/models/users.ts - FIXED
+// backend/src/models/users.ts
 import mongoose from 'mongoose';
 
 export interface IUser extends mongoose.Document {
@@ -29,9 +29,8 @@ const userSchema = new mongoose.Schema({
     email: {
         type: String,
         required: true,
-        unique: true, // This creates an index automatically
+        unique: true,
         lowercase: true
-        // ❌ REMOVED: index: true (duplicate)
     },
     username: {
         type: String,
@@ -49,12 +48,10 @@ const userSchema = new mongoose.Schema({
         type: String,
         enum: ['user', 'admin', 'super_admin'],
         default: 'user'
-        // ❌ REMOVED: index: true (define in schema.index below)
     },
     isActive: {
         type: Boolean,
         default: true
-        // ❌ REMOVED: index: true (define in schema.index below)
     },
     lastLogin: {
         type: Date,
@@ -63,7 +60,7 @@ const userSchema = new mongoose.Schema({
     googleId: {
         type: String,
         sparse: true,
-        unique: true // This creates an index automatically
+        unique: true
     },
     authProvider: {
         type: String,
@@ -88,14 +85,14 @@ const userSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// ✅ Define indexes ONLY here (not in field definitions)
+// Define indexes
 userSchema.index({ role: 1 });
 userSchema.index({ isActive: 1 });
 userSchema.index({ createdAt: -1 });
-userSchema.index({ authProvider: 1 }); // Added for better querying
-userSchema.index({ emailVerified: 1 }); // Added for better querying
+userSchema.index({ authProvider: 1 });
+userSchema.index({ emailVerified: 1 });
 
-// Remove duplicate index definitions - keep only one method
+// Remove duplicate index definitions
 userSchema.set('toJSON', {
     virtuals: true,
     transform: function (doc, ret) {
